@@ -1,0 +1,15 @@
+{
+  "name": "manage-pane",
+  "version": "2.0.0",
+  "author": { "name": "jackok" },
+  "description": "Adds task tools (task_create, task_update, task_list) and a pane that shows the session's tasks with the subagents working them, and the instruction files the context loaded with their sizes; /pane opens or closes it",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "open_on_start": {
+      "type": "boolean",
+      "title": "Open the pane at session start",
+      "description": "Open the pane when an interactive session starts. Off: it opens with the first task of a list, or with /pane.",
+      "default": true
+    }
+  }
+}

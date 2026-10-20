@@ -1,0 +1,15 @@
+{
+  "name": "state",
+  "version": "1.0.1",
+  "author": { "name": "jackok" },
+  "description": "Session state band above the prompt: context trend, model/effort, cwd and git branch, 5h/7d rate limits, cost, tool and subagent tallies, advisor calls, and threshold toasts; /state hides or shows it",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "per_model_limits": {
+      "type": "boolean",
+      "title": "Per-model weekly limits",
+      "description": "Also show per-model weekly limits, read every few minutes from the Anthropic OAuth usage endpoint with your Claude Code login (claude.ai subscriptions only). Off: no network request; only the limits Claude Code reports are shown.",
+      "default": false
+    }
+  }
+}

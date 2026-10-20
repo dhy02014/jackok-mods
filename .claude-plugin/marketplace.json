@@ -1,0 +1,22 @@
+{
+  "name": "jackok-mods",
+  "owner": { "name": "jackok" },
+  "description": "Claude Code mods: a session state band, a task pane with subagents and loaded instruction files, and handoff cards for work left to a later session",
+  "plugins": [
+    {
+      "name": "state",
+      "source": "./state",
+      "description": "Session state band above the prompt: context trend, model and effort, git, rate limits, cost, tool and subagent tallies, threshold toasts; /state hides or shows it"
+    },
+    {
+      "name": "manage-pane",
+      "source": "./manage-pane",
+      "description": "Task tools (task_create, task_update, task_list) and a pane with the session's tasks, the subagents working them, and the loaded instruction files with load counts; /pane opens or closes it"
+    },
+    {
+      "name": "handoff",
+      "source": "./handoff",
+      "description": "Handoff cards for work left to a later session, kept as markdown files in the repo's handoff/ folder: card and list tools, and a band of cards above the prompt; /handoff hides or shows it"
+    }
+  ]
+}

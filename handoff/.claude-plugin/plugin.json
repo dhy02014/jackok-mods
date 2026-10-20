@@ -1,0 +1,15 @@
+{
+  "name": "handoff",
+  "version": "1.1.6",
+  "author": { "name": "jackok" },
+  "description": "Handoff cards for work left to a later session, kept as markdown files in the repo's handoff/ folder (the session's directory outside git): serves `card` (create, update, or with status done close a card, which moves it and its doc into handoff/closed/; nothing is deleted) and `list`, shows the cards in a band above the prompt with each card's age and status and an all/open/hold filter (/handoff hides or shows it), and points the model at them on a session's first prompt",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "hold_on_exit": {
+      "type": "boolean",
+      "title": "Hold /clear and /exit with uncommitted changes",
+      "description": "When the repo has uncommitted changes and no card was written or closed this session, the first /clear or /exit is held with a reminder; entering it again goes through. Off: /clear and /exit are never held.",
+      "default": false
+    }
+  }
+}
