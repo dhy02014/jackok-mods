@@ -63,7 +63,7 @@ const CREATE = 'mcp__manage-pane__task_create'
 const UPDATE = 'mcp__manage-pane__task_update'
 const LIST = 'mcp__manage-pane__task_list'
 const AGENT = 'Agent'
-const AGENT_HINT = 'Optional: start `description` with `#N ` (e.g. `#3 Trace the auth flow`) to have the agent claim open task N in manage-pane.'
+const AGENT_HINT = 'Start `description` with `#N ` (e.g. `#3 Trace the auth flow`), N the open manage-pane task the agent works.'
 
 const board = atom({ plugin: 'manage-pane', key: 'board' } as const, EMPTY, { shape: 'v2' })
 const blink = atom({ plugin: 'manage-pane', key: 'blink' } as const, false)

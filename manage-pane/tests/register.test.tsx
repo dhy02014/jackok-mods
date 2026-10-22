@@ -7,7 +7,7 @@ test('the built-in Agent tool’s description gains the #N sentence; another too
   on('tool.describe', ($, e) => ({ description: e.description }))
   await $.session.start(START)
   const agent = await $.tool.describe({ tool: 'Agent', description: 'Launch an agent.' })
-  expect(agent.description).toMatch(/^Launch an agent\. Optional: start `description` with `#N `/)
+  expect(agent.description).toMatch(/^Launch an agent\. Start `description` with `#N `/)
   expect(agent.description.length).toBeLessThan(200)
   expect((await $.tool.describe({ tool: 'Bash', description: 'Run a command.' })).description).toBe('Run a command.')
 })
