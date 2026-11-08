@@ -122,7 +122,8 @@ export const touch = (all: Record<string, PaneAgent>, id: string, fn: (a: PaneAg
   return a === undefined ? all : { ...all, [id]: fn(a) }
 }
 
-// One running agent: who and where, what it is for, the call it is on; drawn under the task it owns, or under Other.
+// One running agent: who and where, the call it is on; drawn under the task it owns, or under Other.
+// No description row: Claude Code's own bottom bar already shows each running agent's description.
 export const agentBlock = ({ Box, Text }: Draw, t: Strings, id: string, a: PaneAgent, columns: number) => {
   const model = a.model !== '' ? modelLabel(a.model) : undefined
   const head = 2 + cells(a.type) + (model !== undefined ? cells(model) + 1 : 0) + (a.effort !== undefined ? cells(a.effort) + 1 : 0)
@@ -137,11 +138,6 @@ export const agentBlock = ({ Box, Text }: Draw, t: Strings, id: string, a: PaneA
         {model !== undefined && <Text color="cyan"> {model}</Text>}
         {a.effort !== undefined && <Text dimColor>{model !== undefined ? ':' : ' '}{a.effort}</Text>}
         {dir !== undefined && <Text color="blue">  {dir}</Text>}
-      </Text>
-      {/* What it is for. */}
-      <Text wrap="truncate-end">
-        {'  '}
-        {a.description}
       </Text>
       {/* The call it is on: yellow while in flight, dim once it returned and the agent thinks. */}
       {a.recent.map(c => (

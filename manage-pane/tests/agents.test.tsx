@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import { cells } from '../hooks/strings'
 import { START, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, agentTool, agentCall, spawn, listOf, prompt } from './helpers'
 
-test('a running agent shows under its task: what it is for and only the call it is on', async ($, on) => {
+test('a running agent shows under its task: only the call it is on, no description row', async ($, on) => {
   const clock = agentStub(on)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Some task', description: 'd' })
@@ -19,7 +19,8 @@ test('a running agent shows under its task: what it is for and only the call it 
   // No running clock: the CLI's footer already counts it.
   expect(await ui.find({ type: 'Text', text: '1m12s' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /calls/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /^  Fix the parser$/ })).toBeDefined()
+  // No description row: the CLI's footer already shows it.
+  expect(await ui.find({ type: 'Text', text: /Fix the parser/ })).toBeUndefined()
   // Only the latest call, a file by its name; no history, no per-tool counts.
   const calls = await ui.findAll({ type: 'Text', text: /^  · \S/ })
   expect(calls.map(c => c.text)).toEqual(['  · Read parse.ts'])
@@ -76,7 +77,7 @@ test('an agent no task claims is drawn under Other: running as a block, finished
   expect(await ui.find({ type: 'Text', text: 'Some task' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Other' })).toBeDefined()
   expect(await ui.find({ key: 'pane-agent:a1' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '  Review the diff' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Review the diff/ })).toBeUndefined()
   await ui.unmount()
 
   await clock.advance(5_000)
@@ -142,7 +143,6 @@ test('an owned running agent is drawn under its task once; an unowned one under 
   const ui = await mountPane($)
   expect(await ui.find({ key: 'pane-owned:a1' })).toBeDefined()
   expect(await ui.findAll({ key: 'pane-agent:a1' })).toHaveLength(1)
-  expect(await ui.findAll({ type: 'Text', text: '  Does the owned work' })).toHaveLength(1)
   expect(await ui.find({ type: 'Text', text: '  · Bash make' })).toBeDefined()
   expect(await ui.find({ key: 'pane-agent:a2' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /── agents/ })).toBeUndefined()
@@ -157,10 +157,10 @@ test('a spawn whose description opens with #N claims task N: owner, in progress,
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#2 Trace the flow' })
   expect(said(await $.tool.call({ tool: LIST }))).toBe('#1 [pending] First\n#2 [in_progress] Second (owner: a1)')
   expect(out.json?.('sid-1', '2')).toMatchObject({ owner: 'a1', status: 'in_progress' })
-  // The pane shows the description without the mark, under its task.
+  // The pane draws the agent under its task, without its description.
   const ui = await mountPane($)
   expect(await ui.find({ key: 'pane-owned:a1' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '  Trace the flow' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Trace the flow/ })).toBeUndefined()
 })
 
 test('a #N naming no task, a completed one, or no mark at all claims nothing', async ($, on) => {
@@ -215,16 +215,16 @@ test('two Agent calls in one message naming the same task both pass; the first c
   let ui = await mountPane($)
   expect(await ui.find({ key: 'pane-owned:a1' })).toBeDefined()
   expect(await ui.find({ key: 'pane-owned:a2' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '  First' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '  Second' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-agent:a1' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-agent:a2' })).toBeDefined()
   await ui.unmount()
 
   // The second one's finish stays under the task too.
   await clock.advance(5_000)
   await $.turn.complete(done('a2'))
   ui = await mountPane($)
-  expect(await ui.find({ type: 'Text', text: '  First' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: '  Second' })).toBeUndefined()
+  expect(await ui.find({ key: 'pane-agent:a1' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-agent:a2' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: '  └ ✓ explorer Sonnet 5.5:medium 5s' })).toBeDefined()
 })
 
@@ -263,7 +263,6 @@ test('an agent’s directory follows its effort: the last two segments, cut befo
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#1 Here' } as never)
   let ui = await mountPane($)
   expect(await heads(ui)).toContain('◐ explorer Sonnet 5.5:medium  ~/proj')
-  expect(await ui.find({ type: 'Text', text: /^  Here$/ })).toBeDefined()
   await ui.unmount()
 
   await $.agent.spawn({ prompt: 'p', subagentType: 'checker', description: '#2 Far', cwd: '/a/b/c/dddddddddddd' } as never)
@@ -354,8 +353,6 @@ test('a resume fires agent.spawn without resetting the row or claiming again', a
   await $.agent.spawn({ prompt: 'next', subagentType: 'explorer', description: '', resume: true } as never)
   const ui = await mountPane($)
   expect(await ui.find({ key: 'pane-agent:a1' })).toBeDefined()
-  // A fresh row would carry the resume's empty description.
-  expect(await ui.find({ type: 'Text', text: /^  Fix the parser$/ })).toBeDefined()
 })
 
 test('a call from a finished agent is a resume too', async ($, on) => {
