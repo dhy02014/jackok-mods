@@ -14,11 +14,6 @@ export const START = { cwd: '/home/u/proj', surface: 'terminal', isInteractive: 
 
 export const HOME = '/home/u'
 
-export const dirOf = (sid: string) => `${HOME}/.claude/tasks/${sid}`
-
-// The mirror is off by default; a test that reads the mirror files turns it on.
-export const MIRROR = { options: { mirror_task_files: true } } as const
-
 export const CREATE = 'mcp__manage-pane__task_create'
 
 export const UPDATE = 'mcp__manage-pane__task_update'
@@ -33,22 +28,17 @@ export const norm = (path: string) => {
   return path.replace(/\\/g, '/').replace(/^(?:.*\/)?[A-Za-z]:(?=\/)/, '')
 }
 
-// argv reaches the stub as the mod built it, never resolved against the mod folder.
-export const argvNorm = (path: string) => path.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/)/, '')
-
 export type StoredBoard = { at: number; lastId: number; tasks: Record<string, unknown>[] }
 
-// The engine's side: panes, the session id, `$.store` as a map of JSON copies, and a file
-// system in memory where `mv` and `rm`, and `cmd`'s `move` and `del`, act as they would on disk.
+// The engine's side: panes, the session id, `$.store` as a map of JSON copies, a file system
+// in memory, and a process stub that only records argv (the mod runs none).
 export const stub = (
   on: On,
   o: {
     files?: Record<string, string>
     store?: Record<string, unknown>
-    isWriteRefused?: boolean
     env?: Record<string, string>
     language?: string
-    isMoveRefused?: boolean
     /** The store refuses a write while it holds more lists than this. */
     boardCap?: number
   } = {},
@@ -75,6 +65,7 @@ export const stub = (
   const panes = new Set<string>()
   const files = new Map(Object.entries(o.files ?? {}))
   const writes: string[] = []
+  const reads: string[] = []
   const argvs: string[][] = []
   const registered: { name: string; isDeferred?: boolean; required?: unknown }[] = []
   const specText: string[] = []
@@ -105,14 +96,17 @@ export const stub = (
   })
   on('ui.panes', () => ({ value: [...panes].map(id => ({ id, title: 'Tasks', isShown: true, isPlaced: true })) as never }))
   on('fs.write', ($, e) => {
-    if (o.isWriteRefused === true) return { deny: 'EACCES' }
     writes.push(e.path)
     files.set(norm(e.path), e.text)
     return { value: undefined }
   })
-  on('fs.read', ($, e) => (files.has(norm(e.path)) ? { value: files.get(norm(e.path))! } : { deny: 'ENOENT' }))
+  on('fs.read', ($, e) => {
+    reads.push(norm(e.path))
+    return files.has(norm(e.path)) ? { value: files.get(norm(e.path))! } : { deny: 'ENOENT' }
+  })
   on('fs.list', ($, e) => {
     const dir = norm(e.path)
+    reads.push(dir)
     return {
       value: [...files.keys()]
         .filter(p => p.startsWith(`${dir}/`) && !p.slice(dir.length + 1).includes('/'))
@@ -120,34 +114,13 @@ export const stub = (
     }
   })
   on('process.run', ($, e) => {
-    const argv = [...e.argv]
-    argvs.push(argv)
-    let exitCode = 0
-    const isCmd = argv[0] === 'cmd'
-    const [from, to] = isCmd ? [argvNorm(argv[5] ?? ''), argvNorm(argv[6] ?? '')] : [argv[2]!, argv[3]!]
-    if (argv[0] === 'mv' && o.isMoveRefused === true) {
-      exitCode = 1
-    } else if ((argv[0] === 'mv' || (isCmd && argv[3] === 'move')) && files.has(from)) {
-      files.set(to, files.get(from)!)
-      files.delete(from)
-    } else if (argv[0] === 'rm') {
-      files.delete(argv[2]!)
-    } else if (isCmd && argv[3] === 'del') {
-      files.delete(argvNorm(argv[6]!))
-    } else {
-      exitCode = 1
-    }
-    return { value: { exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    argvs.push([...e.argv])
+    return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   // A task as the store holds it for the session.
   const json = (sid: string, id: string) =>
     (store.get(`board:${sid}`) as StoredBoard | undefined)?.tasks.find(t => t.id === id)
-  // A task as the CLI-format mirror wrote it.
-  const file = (sid: string, id: string) => {
-    const text = files.get(`${dirOf(sid)}/${id}.json`)
-    return text === undefined ? undefined : (JSON.parse(text) as Record<string, unknown>)
-  }
-  return { opened, titles, panes, files, writes, argvs, registered, specText, session, json, file, store, storeSets, described, boards }
+  return { opened, titles, panes, files, writes, reads, argvs, registered, specText, session, json, store, storeSets, described, boards }
 }
 
 export const mountPane = ($: Parameters<Parameters<typeof test>[1]>[0]) =>

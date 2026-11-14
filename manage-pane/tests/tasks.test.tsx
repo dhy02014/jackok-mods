@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { START, MIRROR, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, spawn, opening, prompt, rows } from './helpers'
+import { START, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, spawn, opening, prompt, rows } from './helpers'
 
 test('task_create’s description tells of the `#N` claim; task_update’s of reassigning', async ($, on) => {
   const { specText } = stub(on)
@@ -130,17 +130,15 @@ test('task_create with status in_progress starts the task in one call; any other
   expect(bad.deny).toContain('pending or in_progress')
 })
 
-test('task_update sets and clears an owner, in the list text, the store and the mirror', MIRROR, async ($, on) => {
-  const { json, file: fileJson } = stub(on)
+test('task_update sets and clears an owner, in the list text and the store', async ($, on) => {
+  const { json } = stub(on)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Delegated', description: 'd' })
   expect(said(await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a7' }))).toBe(
     'Updated task #1 status, owner',
   )
   expect(said(await $.tool.call({ tool: LIST }))).toBe('#1 [in_progress] Delegated (owner: a7)')
-  expect(Object.keys(fileJson('sid-1', '1')!)).toEqual(['id', 'subject', 'description', 'status', 'owner', 'blocks', 'blockedBy'])
   expect(json('sid-1', '1')).toMatchObject({ owner: 'a7' })
-  expect(fileJson('sid-1', '1')).toMatchObject({ owner: 'a7' })
   expect(said(await $.tool.call({ tool: UPDATE, taskId: '1', owner: 'a7' }))).toBe('Updated task #1 (no changes)')
 
   expect(said(await $.tool.call({ tool: UPDATE, taskId: '1', owner: '' }))).toBe('Updated task #1 owner')

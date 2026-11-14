@@ -19,7 +19,7 @@ import {
 import { flag, newTask, patchOf } from './input'
 import { bankIfShrunk, diskBody, instructionsTree, mergeLoads, scanLoads } from './instructions'
 import { paneTree, remind, withContext } from './pane'
-import { isWindowsPath, moveArgv, removeArgv, slashed } from './platform'
+import { slashed } from './platform'
 import { EN } from './strings'
 import type { AppliedMany } from './tasks'
 import { createLines, summary, updateLines, withText } from './toolrow'
@@ -29,7 +29,6 @@ import {
   asTask,
   doneFilter,
   EMPTY,
-  fileText,
   handbackText,
   listText,
   own,
@@ -43,21 +42,17 @@ import {
 // One pane, open at session start: the session's tasks on top, its subagents pinned
 // under them, and below them the instruction files the context carried with their load
 // counts; /pane opens or closes it. The task tools are served here; each session's list is
-// kept in `$.store` under its session id, so a resumed session picks it back up. With the
-// `mirror_task_files` option on, every change is also written to
-// <config dir>/tasks/<session or CLAUDE_CODE_TASK_LIST_ID>/<id>.json in the CLI's own format.
+// kept in `$.store` under its session id, so a resumed session picks it back up. Nothing is
+// written outside the store: the CLI's tasks directory is never read or written.
 // The pure halves are ./tasks and ./agents; everything that touches `$` stays in this file,
 // the only one the engine follows it into.
 
 type Options = {
   open_on_start?: unknown
-  mirror_task_files?: unknown
 }
 
-// From `register`'s options; the defaults are the manifest's.
+// From `register`'s options; the default is the manifest's.
 let openOnStart = true
-// Off by default: the tasks directory is the CLI's, written only when the user asks for it.
-let isMirrored = false
 
 const t = EN
 
@@ -139,9 +134,7 @@ const STORE_PREFIX = 'board:'
 const BOARDS_KEPT = 50
 
 // `deleted`: ids this session's processes deleted. Ids are never reused, so a merge drops them for good.
-// `mirrorFrom`: the first id minted with the mirror on. A lower id never consulted the
-// directory, so its file there may be another writer's: the mirror never touches it.
-type Stored = { at: number; lastId: number; tasks: PaneTask[]; deleted?: string[]; mirrorFrom?: number }
+type Stored = { at: number; lastId: number; tasks: PaneTask[]; deleted?: string[] }
 
 const decimals = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && /^\d+$/.test(x)) : [])
 
@@ -155,8 +148,7 @@ const storedBoard = async ($: EngineInterface, sid: string) => {
       })
     : []
   const lastId = typeof raw.lastId === 'number' && Number.isInteger(raw.lastId) ? raw.lastId : 0
-  const mirrorFrom = typeof raw.mirrorFrom === 'number' && Number.isInteger(raw.mirrorFrom) ? raw.mirrorFrom : undefined
-  return { lastId: Math.max(lastId, 0, ...tasks.map(x => Number(x.id))), tasks, deleted: decimals(raw.deleted), mirrorFrom }
+  return { lastId: Math.max(lastId, 0, ...tasks.map(x => Number(x.id))), tasks, deleted: decimals(raw.deleted) }
 }
 
 // Drops the oldest lists past `keep`; `current`'s is never one of them.
@@ -174,7 +166,7 @@ const prune = async ($: EngineInterface, keep: number, current: string | undefin
   for (const { key } of aged.slice(0, keys.length - keep)) await $.store.delete(key).catch(ignore)
 }
 
-// ---- the CLI-format mirror ----
+// ---- the config directory ----
 
 // Windows has no HOME by default: USERPROFILE stands in.
 const homeOf = async ($: EngineInterface) => {
@@ -190,44 +182,6 @@ const configRoot = async ($: EngineInterface) => {
   return home === undefined ? undefined : `${home}/.claude`
 }
 
-// The CLI names the directory by CLAUDE_CODE_TASK_LIST_ID when it is set, so its own
-// TaskCreate and this mirror share one list. Only a plain name: it becomes a path segment.
-// Undefined while the mirror is off, which skips every write, delete and id read under it.
-const taskDir = async ($: EngineInterface, sid: string | null | undefined) => {
-  if (!isMirrored || sid === undefined || sid === null) return undefined
-  const root = await configRoot($)
-  if (root === undefined) return undefined
-  const listId = await $.env.get('CLAUDE_CODE_TASK_LIST_ID').catch(() => undefined)
-  const name = listId !== undefined && /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(listId) ? listId : sid
-  return `${root}/tasks/${name}`
-}
-
-// The highest id the mirror directory holds, a `<n>.json` or `.highwatermark`: the built-in
-// TaskCreate mints into the same directory, so the next id must clear what it wrote too.
-const mirroredMax = async ($: EngineInterface, sid: string | undefined) => {
-  const dir = await taskDir($, sid)
-  if (dir === undefined) return 0
-  const names = (await $.fs.list(dir).catch(() => [])).map(f => f.name)
-  const ids = names.flatMap(n => /^(\d+)\.json$/.exec(n)?.[1] ?? []).map(Number)
-  const mark = names.includes('.highwatermark') ? Number((await $.fs.read(`${dir}/.highwatermark`).catch(() => '')).trim()) : 0
-  return Math.max(0, ...ids, Number.isInteger(mark) ? mark : 0)
-}
-
-// Temp file in the same directory, then a rename, so a reader never sees half a file; the
-// temp name does not end in `.json`, so a `*.json` reader skips it. `$.fs` has no rename, so
-// the rename is the OS `mv` (resolved through PATH); on Windows the file is written in place.
-const writeAtomic = async ($: EngineInterface, path: string, text: string) => {
-  if (isWindowsPath(path)) return $.fs.write(path, text)
-  const tmp = `${path}.tmp`
-  await $.fs.write(tmp, text)
-  const argv = moveArgv(tmp, path)
-  const mv = argv && (await $.process.run(argv).catch(ignore))
-  if (mv?.exitCode === 0) return
-  await $.fs.write(path, text)
-  const rm = removeArgv(tmp)
-  if (rm !== undefined) await $.process.run(rm).catch(ignore)
-}
-
 // What another process of the same session stored since this one read it is kept: its
 // tasks, unless deleted here or there; a task this write changed is this process's.
 // Store get and set are separate calls, so a write landing between them still wins.
@@ -241,45 +195,25 @@ const merged = (b: PaneBoard, stored: Awaited<ReturnType<typeof storedBoard>>, o
   return { board: { ...b, lastId: Math.max(b.lastId, stored?.lastId ?? 0), tasks }, deleted: [...deleted] }
 }
 
-// The board as written, merged with the store's copy and saved whole; the changed tasks written to the mirror, the deleted ones removed (`$.fs` has no delete: the OS `rm`, or
-// cmd's del on Windows), and a create's high-water mark. Returns the board as saved.
-// `mirrorFrom` starts the list's mirror at that id when the store holds no start yet.
+// The board as written, merged with the store's copy and saved whole. Returns the board as saved.
 const persist = async (
   $: EngineInterface,
   b: PaneBoard,
-  o: { write?: readonly PaneTask[]; remove?: readonly string[]; highWater?: number; mirrorFrom?: number },
+  o: { write?: readonly PaneTask[]; remove?: readonly string[] },
 ): Promise<PaneBoard> => {
   const sid = b.sessionId
   if (sid === null) return b
   const stored = await storedBoard($, sid)
   const m = merged(b, stored, o)
-  const mirrorFrom = stored?.mirrorFrom ?? o.mirrorFrom
   const key = `${STORE_PREFIX}${sid}`
-  const value = {
-    at: Date.now(),
-    lastId: m.board.lastId,
-    tasks: m.board.tasks,
-    deleted: m.deleted,
-    ...(mirrorFrom !== undefined ? { mirrorFrom } : {}),
-  } satisfies Stored
+  const value = { at: Date.now(), lastId: m.board.lastId, tasks: m.board.tasks, deleted: m.deleted } satisfies Stored
   const isSaved = await $.store.set(key, value).then(() => true, () => false)
   // The store is capped: a refused write makes room by dropping older sessions' lists, then tries once more.
   if (!isSaved) {
     await prune($, Math.floor(BOARDS_KEPT / 2), sid).catch(ignore)
     await $.store.set(key, value).catch(ignore)
   }
-  const saved = await update($, board, cur => (cur.sessionId === sid ? m.board : cur))
-  if (mirrorFrom === undefined) return saved
-  const dir = await taskDir($, sid)
-  if (dir === undefined) return saved
-  const isOurs = (id: string) => Number(id) >= mirrorFrom
-  for (const x of (o.write ?? []).filter(x => isOurs(x.id))) await writeAtomic($, `${dir}/${x.id}.json`, fileText(x)).catch(ignore)
-  for (const id of (o.remove ?? []).filter(isOurs)) {
-    const argv = removeArgv(`${dir}/${id}.json`)
-    if (argv !== undefined) await $.process.run(argv).catch(ignore)
-  }
-  if (o.highWater !== undefined) await writeAtomic($, `${dir}/.highwatermark`, String(o.highWater)).catch(ignore)
-  return saved
+  return update($, board, cur => (cur.sessionId === sid ? m.board : cur))
 }
 
 // A task that goes in progress is brought into view, moving the pane's window the least
@@ -414,7 +348,6 @@ const claim = async ($: EngineInterface, taskId: string, agentId: string) => {
 export const register: Register = (on, options) => {
   const o = (options ?? {}) as Options
   openOnStart = flag(o.open_on_start, true)
-  isMirrored = flag(o.mirror_task_files, false)
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'pane', description: t.commandDescription }).catch(ignore)
@@ -612,27 +545,18 @@ export const register: Register = (on, options) => {
     }
     await restore($).catch(ignore)
     const sid = await sessionId($)
-    // Another process of the same session may have minted ids since this one loaded, and
-    // the built-in TaskCreate may have written into the same directory.
-    const kept = sid === undefined ? undefined : await storedBoard($, sid)
-    const stored = kept?.lastId ?? 0
-    const mirrored = await mirroredMax($, sid).catch(() => 0)
-    // The mirror starts with this call's ids when none started it yet: they cleared the directory's.
-    const startsMirror = isMirrored && kept?.mirrorFrom === undefined
+    // Another process of the same session may have minted ids since this one loaded.
+    const stored = (sid === undefined ? undefined : await storedBoard($, sid))?.lastId ?? 0
     const seen = { wasIdle: false }
     const local = await update($, board, b => {
       const cur = own(b, sid)
-      const first = Math.max(cur.lastId, stored, mirrored, ...cur.tasks.map(x => Number(x.id))) + 1
+      const first = Math.max(cur.lastId, stored, ...cur.tasks.map(x => Number(x.id))) + 1
       const made = items.map((it, i) => newTask(first + i, it.subject, it.fields))
       seen.wasIdle = cur.tasks.every(x => x.status === 'completed')
       return { sessionId: cur.sessionId, lastId: first + items.length - 1, tasks: [...cur.tasks, ...made] }
     })
     const made = local.tasks.slice(-items.length)
-    const written = await persist($, local, {
-      write: made,
-      highWater: local.lastId,
-      ...(startsMirror ? { mirrorFrom: Number(made[0]!.id) } : {}),
-    })
+    const written = await persist($, local, { write: made })
     // The first task of a list reopens the pane; one the person closed mid-list stays
     // closed until the next list. /pane toggles it any time. The tab the person picked
     // stays put: the Task tab redraws from the board whether it is shown or not.

@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { cells } from '../hooks/strings'
-import { START, MIRROR, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, agentTool, agentCall, spawn, listOf, prompt, step, stepOpen } from './helpers'
+import { START, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, agentTool, agentCall, spawn, listOf, prompt, step, stepOpen } from './helpers'
 
 test('a running agent shows under its task: only the call it is on, no description row', async ($, on) => {
   const clock = agentStub(on)
@@ -329,7 +329,7 @@ test('on Windows the definition is read under USERPROFILE and paths read with `/
   expect(await ui.find({ type: 'Text', text: '◐ isolated Sonnet 5.5  worktree' })).toBeDefined()
 })
 
-test('with CLAUDE_CONFIG_DIR set, user definitions and the task mirror live under it, not under HOME', MIRROR, async ($, on) => {
+test('with CLAUDE_CONFIG_DIR set, user definitions are read under it, not under HOME', async ($, on) => {
   const out: Parameters<typeof agentStub>[1] = {}
   agentStub(on, out, {
     env: { HOME: '/home/u', CLAUDE_CONFIG_DIR: '/cfg' },
@@ -340,8 +340,6 @@ test('with CLAUDE_CONFIG_DIR set, user definitions and the task mirror live unde
   })
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Cfg', description: 'd' })
-  expect(JSON.parse(out.files!.get('/cfg/tasks/sid-1/1.json')!)).toMatchObject({ id: '1', subject: 'Cfg' })
-  expect([...out.files!.keys()].filter(p => p.startsWith('/home/u/.claude/tasks/'))).toEqual([])
   await $.agent.spawn({ prompt: 'p', subagentType: 'isolated', description: '#1 Def' } as never)
   const ui = await mountRows($, 40)
   expect(await ui.find({ type: 'Text', text: '◐ isolated Sonnet 5.5  worktree' })).toBeDefined()

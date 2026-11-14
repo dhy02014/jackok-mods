@@ -4,7 +4,7 @@ import type { PaneBoard, PaneOwnerRun, PaneTask, PaneTaskStatus } from '../types
 import type { Strings } from './strings'
 
 // The task list's pure half: the tool specs, the list step task_update applies, the
-// stored and mirrored task shape, and the tree the pane's upper part draws. Every hook and every
+// stored task shape, and the tree the pane's upper part draws. Every hook and every
 // `$` call is in ./register.tsx (the engine follows `$` into no imported file).
 
 export const EMPTY: PaneBoard = { sessionId: null, lastId: 0, tasks: [] }
@@ -102,7 +102,7 @@ const asRun = (v: unknown): PaneOwnerRun | undefined => {
 }
 
 // A task as read back from `$.store`; undefined for anything that is not one. Ids are decimal:
-// the next id is minted from the largest, and the mirror names files by it.
+// the next id is minted from the largest.
 export const asTask = (raw: unknown): PaneTask | undefined => {
   const r = raw as Record<string, unknown> | null
   const id = str(r?.id)
@@ -120,24 +120,6 @@ export const asTask = (raw: unknown): PaneTask | undefined => {
     blockedBy: strings(r.blockedBy),
   }
 }
-
-// The mirror file: exactly the CLI's task-file keys and layout, plus `ownerRun`, which only this pane reads.
-export const fileText = (t: PaneTask) =>
-  JSON.stringify(
-    {
-      id: t.id,
-      subject: t.subject,
-      description: t.description,
-      ...(t.activeForm !== undefined ? { activeForm: t.activeForm } : {}),
-      status: t.status,
-      ...(t.owner !== undefined ? { owner: t.owner } : {}),
-      ...(t.ownerRun !== undefined ? { ownerRun: t.ownerRun } : {}),
-      blocks: t.blocks,
-      blockedBy: t.blockedBy,
-    },
-    null,
-    2,
-  )
 
 // ---- task_update as a pure step over the list ----
 
