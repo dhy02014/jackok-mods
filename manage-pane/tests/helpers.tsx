@@ -21,7 +21,7 @@ export const UPDATE = 'mcp__manage-pane__task_update'
 export const LIST = 'mcp__manage-pane__task_list'
 
 // A Windows path as the in-memory disk keys it: `C:\Users\u\x` → `/Users/u/x`. The POSIX test
-// host hands `$.fs` a drive path resolved against the mod folder, which argv never is: drop that too.
+// host hands `$.fs` a drive path resolved against the mod folder: drop that too.
 // A second drive marker means the mod glued two absolute paths together: fail, never key it.
 export const norm = (path: string) => {
   if ((path.match(/[A-Za-z]:[\\/]/g) ?? []).length > 1) throw new Error(`doubled path: ${path}`)

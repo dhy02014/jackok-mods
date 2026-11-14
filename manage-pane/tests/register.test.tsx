@@ -28,6 +28,17 @@ test('create, update and delete keep the list in the store alone: no file write,
   expect(argvs).toEqual([])
 })
 
+test('on a Windows home with no HOME, a list runs no process and leaves no file, temp or otherwise', async ($, on) => {
+  const { files, writes, argvs } = stub(on, { env: { USERPROFILE: 'C:\\Users\\u' } })
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'One' }, { subject: 'Two' }] })
+  await $.tool.call({ tool: UPDATE, taskId: '2', status: 'deleted' })
+  expect(argvs.flat().filter(a => a.includes('/bin/'))).toEqual([])
+  expect(argvs).toEqual([])
+  expect(writes).toEqual([])
+  expect([...files.keys()].filter(p => p.endsWith('.tmp'))).toEqual([])
+})
+
 test('the three tools are registered in front with the built-ins’ required fields, kept small', async ($, on) => {
   const { registered, specText } = stub(on)
   await $.session.start(START)

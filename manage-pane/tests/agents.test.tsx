@@ -345,6 +345,21 @@ test('with CLAUDE_CONFIG_DIR set, user definitions are read under it, not under 
   expect(await ui.find({ type: 'Text', text: '◐ isolated Sonnet 5.5  worktree' })).toBeDefined()
 })
 
+test('on Windows a CLAUDE_CONFIG_DIR with a trailing backslash holds the user definitions, not USERPROFILE', async ($, on) => {
+  agentStub(on, {}, {
+    env: { USERPROFILE: 'C:\\Users\\u', CLAUDE_CONFIG_DIR: 'C:\\cfg\\' },
+    files: {
+      '/Users/u/.claude/agents/isolated.md': '---\nname: isolated\n---\nbody\n',
+      '/cfg/agents/isolated.md': '---\nname: isolated\nisolation: worktree\n---\nbody\n',
+    },
+  })
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'Cfg', description: 'd' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'isolated', description: '#1 Def' } as never)
+  const ui = await mountRows($, 40)
+  expect(await ui.find({ type: 'Text', text: '◐ isolated Sonnet 5.5  worktree' })).toBeDefined()
+})
+
 test('an agent’s effort and model are what its requests carried, never a definition’s guess', async ($, on) => {
   agentStub(on)
   const head = async () => {

@@ -55,7 +55,7 @@ What it touches: with `per_model_limits` off, no network request is made and onl
 
 Adds the tools `task_create`, `task_update` and `task_list` (Claude sees them as `mcp__manage-pane__task_*`), and a pane with two tabs. The Task tab lists the tasks with the subagents working them; agents claiming no task are listed under Other. The Prompt tab lists the instruction files loaded, each with the size of the body the context carried, and their total. `/pane` opens or closes the pane.
 
-Tasks persist in the plugin's own store, which keeps the newest 50 sessions. `/resume` and `/branch` empty the pane's task list at once. After `/resume`, the list comes back from the store on the next main-loop turn or task tool call. `/branch` starts with an empty list; the parent's list is not copied.
+Tasks persist in the plugin's own store, which keeps the newest 50 sessions. A resumed session whose list was dropped starts again at #1. `/resume` and `/branch` empty the pane's task list at once. After `/resume`, the list comes back from the store on the next main-loop turn or task tool call. `/branch` starts with an empty list; the parent's list is not copied.
 
 These behaviours are always on:
 
@@ -72,7 +72,7 @@ The description of `task_create` tells the model to use these tools instead of t
 
 To turn manage-pane off, disable the plugin.
 
-What it touches: the plugin's own task store; it never reads or writes the CLI tasks directory and runs no processes. It reads user agent definitions (for `isolation: worktree`) from `$CLAUDE_CONFIG_DIR/agents` when set, else `~/.claude/agents`, after the project's `<cwd>/.claude/agents`.
+What it touches: the plugin's own task store; it never reads or writes the CLI tasks directory and runs no processes. It reads user agent definitions (for `isolation: worktree`) from `$CLAUDE_CONFIG_DIR/agents` when set, else `~/.claude/agents`, after the project's `<cwd>/.claude/agents`. It reads back, to size them, the instruction files (CLAUDE.md, rules) the conversation loaded.
 
 Models that still ship the built-in task tools (Opus 4.7, Sonnet 4.6, Haiku 4.5 and earlier, per the [tools reference](https://code.claude.com/docs/en/tools-reference)) would see two task tool sets. To avoid that, leave the built-in task tools out of the list you pass to `--tools`.
 
