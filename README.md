@@ -6,13 +6,13 @@ A Claude Code plugin marketplace of [mods](https://code.claude.com/docs/en/plugi
 | :-- | :-- |
 | `state` | A band above the prompt with context trend, model and effort, cwd and git branch, 5-hour and 7-day rate limits, cost, tool and subagent tallies, advisor calls, and threshold toasts. `/state` hides or shows it. |
 | `manage-pane` | Task tools (`task_create`, `task_update`, `task_list`) and a pane with the session's tasks, the subagents working them, and the loaded instruction files. `/pane` opens or closes it. |
-| `handoff` | Handoff cards as markdown files in the repo, `card` and `list` tools, and a band of cards above the prompt. `/handoff` hides or shows it. |
+| `handoff` | Handoff cards as local, uncommitted markdown notes in the repo, `card` and `list` tools, and a band of cards above the prompt. `/handoff` hides or shows it. |
 
 ## Requirements
 
 The plugins need Claude Code v2.1.299 or later; the `manage-pane` pane uses text props that earlier releases do not draw. Check with `claude --version`.
 
-Nothing else is required. git is optional: without it, `state` shows no git row and `handoff` uses the session directory. `handoff` also runs the OS `mkdir -p` and `mv -n`, and `manage-pane` runs the OS `mv -f` and `rm -f`, because the mods file API has no mkdir, rename or delete.
+Nothing else is required. git is optional: without it, `state` shows no git row and `handoff` uses the session directory. `handoff` runs git (`rev-parse`, `ls-files`, `status`, `check-ignore`) when it is available, and the OS `mkdir` and `mv` (cmd's built-ins on Windows); `manage-pane` runs the OS `mv -f` and `rm -f`. Both do so `manage-pane` runs the OS `mv -f` and `rm -f`, because the mods file API has no mkdir, rename or delete.
 
 Where an organization manages Claude Code, some hooks do not run in a plugin a person installs: the compaction and model-switch toasts of `state`, and the cwd-change refresh of `handoff`.
 
@@ -75,7 +75,7 @@ Models that still ship the built-in task tools (Opus 4.7, Sonnet 4.6, Haiku 4.5 
 
 Cards are markdown files in `<repo>/handoff/`, and closed cards are in `<repo>/handoff/closed/`. Inside a git worktree, the repo is the main checkout; without git, it is the session directory. Outside git, `card` refuses to create a card when the session's folder is the home folder or a filesystem root.
 
-Cards are local notes and are not committed by default. The mod never edits `.gitignore` or anything under `.git`. To keep cards out of `git status`, add these lines to `.gitignore` or `.git/info/exclude`: `/handoff/*.md` and `/handoff/closed/` (or simply `/handoff/`). Creating a card in a git repo runs `git check-ignore`; if the `handoff/` folder is not ignored, the tool result tells Claude so and suggests adding `/handoff/` to `.gitignore` or `.git/info/exclude`.
+Cards are local notes and are not committed by default. The mod never edits `.gitignore` or anything under `.git`. To keep cards out of `git status`, add these lines to `.gitignore` or `.git/info/exclude`: `/handoff/*.md` and `/handoff/closed/` (or simply `/handoff/`). Creating the first card in a repo's card folder runs `git check-ignore`; if the folder is not ignored, the tool result tells Claude to mention to the user that `/handoff/` can be added to `.gitignore` or `.git/info/exclude`, and not to edit either file unless asked. The note appears once per repo and never in a repo whose card folder already holds files.
 
 The `card` tool creates or updates a card, and `status: done` closes it. Its description tells Claude to call it only when the user asks for a handoff or to save work for a later session. The `list` tool lists cards. A band above the prompt shows the cards with each one's age and status and an all/open/hold filter; `/handoff` hides or shows it. On a session's first prompt, the model gets pointers to the cards.
 
@@ -83,11 +83,11 @@ Each card is one band row. `card` refuses a new `title` wider than 40 terminal c
 
 | Option | Default | Effect |
 | :-- | :-- | :-- |
-| `hold_on_exit` | off | When the repo has uncommitted changes and no card was written or closed this session, the first `/clear` or `/exit` is held with a reminder; entering it again goes through. Files in the card folder never count as uncommitted work. |
+| `hold_on_exit` | off | When the repo has uncommitted changes and no card was written or closed this session, the first `/clear` or `/exit` is held with a reminder; entering it again goes through. Every change under the repo's top-level `handoff/` folder is ignored, not just card files. |
 
-Permissions: a deny permission rule (or a policy that denies the tool) for `mcp__handoff__card` is honoured, and no card is created, updated or closed. Plan mode refuses card writes; the mode is read from the latest prompt or tool event, so a switch mid-turn takes effect at the next such event. Otherwise card writes are not prompted, because a mod tool cannot open a permission dialog on this Claude Code version; a rule that would ask lets the write through.
+Permissions: a deny permission rule (or a policy that denies the tool) for `mcp__handoff__card` is honoured, and no card is created, updated or closed. Plan mode refuses card writes; the mode is read from the main conversation's latest prompt, successful tool call or failed tool call event, so a switch mid-turn takes effect at the next such event, and a subagent's own mode is ignored. If no such event reaches the mod (for example where an organization's built-in guard passes over settings-hook events), the mode stays unknown and plan mode is not refused; if Claude Code cannot answer the permission check, nothing is refused. Otherwise card writes are not prompted, because a mod tool cannot open a permission dialog on this Claude Code version; a rule that would ask lets the write through.
 
-What it touches: closing moves the card into `handoff/closed/`, and moves its linked doc too, only when that doc is a git-tracked file in the repo that no open card still names. The closed card's `doc:` line is updated. Nothing is deleted or overwritten: name clashes get `-2`, `-3` and so on, and a failed move leaves the file in place. It runs `git rev-parse`, `git ls-files`, `git status`, `git check-ignore`, `mkdir` and `mv` (cmd's built-ins on Windows).
+What it touches: closing moves the card into `handoff/closed/`, and moves its linked doc too, only when that doc is a git-tracked file in the repo that no open card still names. The closed card's `doc:` line is updated. Nothing is deleted or overwritten: name clashes get `-2`, `-3` and so on, and a failed move leaves the file in place. It runs `git rev-parse`, `git ls-files`, `git status`, `git check-ignore`, `mkdir` and `mv` (cmd's built-ins on Windows), and every git run uses `--no-optional-locks`. The card refresh after each turn runs in the background and never holds the turn. The home-folder refusal compares the path as given; a symlinked home is not resolved.
 
 ## Language
 
