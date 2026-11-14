@@ -212,6 +212,7 @@ export const taskAgentsTree = (
 
 // Agents no task claims: none owned by a task in the list, none whose `#N` names one. Running
 // ones first in spawn order, then the newest FINISHED_OTHERS finished, under an `Other` heading.
+// The `[open]` filter hides finished ones like completed tasks; with none running the heading goes too.
 const FINISHED_OTHERS = 3
 
 export const otherAgentsTree = (
@@ -232,7 +233,7 @@ export const otherAgentsTree = (
   const isNamedElsewhere = (id: string, a: PaneAgent) => a.taskId !== undefined && list.some(x => x.id === a.taskId && isShown(x) && x.owner !== id)
   const running = Object.entries(all).filter(([id, a]) => a.isRunning && !live.has(id) && !isNamedElsewhere(id, a))
   const finished = Object.entries(all)
-    .filter(([id, a]) => !a.isRunning && !owners.has(id) && !isNamed(a))
+    .filter(([id, a]) => !isDoneHidden && !a.isRunning && !owners.has(id) && !isNamed(a))
     .sort(([, x], [, y]) => (y.endedAt ?? y.startedAt) - (x.endedAt ?? x.startedAt))
     .slice(0, FINISHED_OTHERS)
   if (running.length + finished.length === 0) return undefined

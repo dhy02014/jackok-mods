@@ -89,7 +89,7 @@ test('an agent no task claims is drawn under Other: running as a block, finished
   expect((await ui.find({ type: 'Text', text: /^  └ ✓ checker/ }))?.props.dimColor).toBe(true)
 })
 
-test('only the 3 newest finished unclaimed agents are drawn, running ones first; with the [open] filter too', async ($, on) => {
+test('only the 3 newest finished unclaimed agents are drawn, running ones first; [open] keeps only the running', async ($, on) => {
   const clock = agentStub(on)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Done', description: 'd' })
@@ -107,6 +107,24 @@ test('only the 3 newest finished unclaimed agents are drawn, running ones first;
   await ui.press({ key: 'filter-open' })
   expect(await ui.find({ type: 'Text', text: 'Other' })).toBeDefined()
   expect(await ui.find({ key: 'pane-agent:a5' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^  └ ✓/ })).toBeUndefined()
+  await ui.press({ key: 'filter-all' })
+  expect(await ui.find({ type: 'Text', text: /^  └ ✓ t4/ })).toBeDefined()
+})
+
+test('[open] with only finished unclaimed agents drops the Other heading', async ($, on) => {
+  const clock = agentStub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'Done', description: 'd' })
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'completed' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'checker', description: 'Review' })
+  await clock.advance(1_000)
+  await $.turn.complete(done('a1'))
+  const ui = await mountPane($)
+  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeDefined()
+  await ui.press({ key: 'filter-open' })
+  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^  └ ✓ checker/ })).toBeUndefined()
 })
 
 test('with every agent claimed there is no Other heading', async ($, on) => {
