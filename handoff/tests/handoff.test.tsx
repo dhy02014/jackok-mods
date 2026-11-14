@@ -70,7 +70,11 @@ const stub = (
     fail?: 'mkdir' | 'mv' | 'skip'
   } = {},
 ) => {
-  mock.clock(on, { now: NOW })
+  const clock = mock.clock(on, { now: NOW })
+  // The next folder listing answers the files as they are now, once the test advances the clock
+  // by `ms` (holdNextList); later listings answer at once.
+  let held: { ms: number; files: Map<string, string> } | undefined
+  const holdNextList = (ms: number) => (held = { ms, files: new Map(files) })
   mock.env(on, o.env ?? { HOME })
   mock.store(on)
   if (o.language !== undefined) on('settings.read', () => ({ value: { language: o.language } }))
@@ -130,16 +134,20 @@ const stub = (
   on('fs.list', ($, e) => {
     const dir = norm(e.path)
     if (!isDir(dir)) return { deny: 'ENOENT' }
+    // A held listing answers the files as they were when the hold was set.
+    const source = held === undefined ? files : held.files
     const kinds = new Map<string, 'file' | 'dir'>()
-    for (const p of [...files.keys(), ...dirs]) {
+    for (const p of [...source.keys(), ...dirs]) {
       if (!p.startsWith(`${dir}/`) || o.unlisted?.includes(p)) continue
       const rest = p.slice(dir.length + 1)
       const name = rest.split('/')[0]!
-      kinds.set(name, rest === name && files.has(p) ? 'file' : 'dir')
+      kinds.set(name, rest === name && source.has(p) ? 'file' : 'dir')
     }
-    return {
-      value: [...kinds].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: mtimeOf(`${dir}/${name}`), isLink: false })),
-    }
+    const value = [...kinds].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: mtimeOf(`${dir}/${name}`), isLink: false }))
+    if (held === undefined) return { value }
+    const { ms } = held
+    held = undefined
+    return clock.sleep(ms).then(() => ({ value }))
   })
   const done = (exitCode: number, stderr = '') => ({
     value: { exitCode, stdout: '', stderr, isStdoutTruncated: false, isStderrTruncated: false },
@@ -207,7 +215,7 @@ const stub = (
     const { Text } = $.ui.resolve(e)
     return <Text>below</Text>
   })
-  return { files, session, runs, limits, dirs, registered, checks }
+  return { files, session, runs, limits, dirs, registered, checks, clock, holdNextList }
 }
 
 const said = (r: { result?: unknown; text?: string; deny?: string }) => String(r.deny ?? r.text ?? r.result)
@@ -1198,22 +1206,25 @@ test('a git repo at home still takes a card', async ($, on) => {
 
 const hookBase = { session_id: 'sid-1', transcript_path: '/t.jsonl', cwd: MAIN }
 
+const PLAN_REFUSAL =
+  'card: plan mode was on at the last prompt or tool event, so no card was written, updated or closed. If plan mode has since been turned off, retry after the next tool call or prompt.'
+
 test('plan mode, as the latest prompt or tool event reports it, refuses create, update and close; a subagent’s mode is not kept', async ($, on) => {
   const { files } = stub(on, { files: { [`${CARDS}/2026-10-10-seen.md`]: card({ title: 'Seen' }) } })
   await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
   await $.classic.UserPromptSubmit({ ...hookBase, permission_mode: 'plan', hook_event_name: 'UserPromptSubmit', prompt: 'p' } as never)
   const before = new Map(files)
   for (const call of [{ title: 'New', next: 'n' }, { slug: 'seen', next: 'm' }, { slug: 'seen', status: 'done' }]) {
-    expect(said(await $.tool.call({ tool: WRITE, ...call }))).toBe('card: plan mode is on, so no card was written, updated or closed; leave plan mode first.')
+    expect(said(await $.tool.call({ tool: WRITE, ...call }))).toBe(PLAN_REFUSAL)
   }
   expect(files).toEqual(before)
   await $.classic.PostToolUse({ ...hookBase, agent_id: 'a1', permission_mode: 'default', hook_event_name: 'PostToolUse' } as never)
-  expect(said(await $.tool.call({ tool: WRITE, title: 'New', next: 'n' }))).toMatch(/plan mode is on/)
+  expect(said(await $.tool.call({ tool: WRITE, title: 'New', next: 'n' }))).toBe(PLAN_REFUSAL)
   await $.classic.PostToolUse({ ...hookBase, permission_mode: 'acceptEdits', hook_event_name: 'PostToolUse' } as never)
   expect(said(await $.tool.call({ tool: WRITE, title: 'New', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-new.md')
   // A failed tool reports the mode too.
   await $.classic.PostToolUseFailure({ ...hookBase, permission_mode: 'plan', hook_event_name: 'PostToolUseFailure' } as never)
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Later', next: 'n' }))).toMatch(/plan mode is on/)
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Later', next: 'n' }))).toBe(PLAN_REFUSAL)
   await $.classic.PostToolUseFailure({ ...hookBase, permission_mode: 'default', hook_event_name: 'PostToolUseFailure' } as never)
   expect(said(await $.tool.call({ tool: WRITE, title: 'Later', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-later.md')
 })
@@ -1243,6 +1254,19 @@ test('fails open: a permission check the engine cannot answer refuses nothing, a
   await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
   expect(said(await $.tool.call({ tool: WRITE, title: 'Unchecked', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-unchecked.md')
   expect(checks).toHaveLength(1)
+})
+
+test('a turn’s background refresh that ends after a newer one leaves the newer cards in the band', async ($, on) => {
+  const { files, clock, holdNextList } = stub(on, { files: { [`${CARDS}/2026-10-10-seen.md`]: card({ title: 'Seen' }) } })
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ plugin: 'handoff', surface: 'terminal', ...BAND })
+  holdNextList(1000)
+  // turn.complete starts a refresh and does not wait: its listing, which saw only Seen, is held.
+  await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false, usage: null } as never)
+  files.set(`${CARDS}/2026-10-11-later.md`, card({ title: 'Later' }))
+  expect(said(await $.tool.call({ tool: LIST }))).toMatch(/Later/)
+  await clock.advance(1000)
+  expect(await ui.find({ type: 'Text', text: /Later/ })).toBeDefined()
 })
 
 test('fails open: with no permission mode ever reported (no classic event reached the mod), card writes', async ($, on) => {

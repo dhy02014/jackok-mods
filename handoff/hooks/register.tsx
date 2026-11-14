@@ -135,15 +135,20 @@ const where = async ($: EngineInterface, cwd?: string) => {
   return { root: root ?? at, cwd: at, isGit: root !== undefined }
 }
 
+// Only the newest refresh writes the view: an unawaited one (turn.complete) that ends after a
+// later one would put older cards back. Each caller still gets the cards it read.
 const refresh = async ($: EngineInterface, cwd?: string) => {
+  const seq = ++refreshSeq
   const at = await where($, cwd)
   const { cards, unreadable } = await loadAll($, at.root)
-  const v = await update($, view, () => ({ root: at.root, cwd: at.cwd, cards }))
+  const fresh = { root: at.root, cwd: at.cwd, cards }
+  const v = seq === refreshSeq ? await update($, view, () => fresh) : fresh
   return { ...v, unreadable }
 }
 
 // The band's own load of a view never loaded, while it runs.
 let loading: Promise<unknown> | undefined
+let refreshSeq = 0
 
 const failed = () => ({ deny: 'handoff: the tool failed; no card changed.' })
 
@@ -229,7 +234,7 @@ const retireDoc = async (
 // reaches this mod) and a check the engine cannot answer refuse nothing.
 const refusal = async ($: EngineInterface, input: Record<string, unknown>) => {
   if ((await read($, permissionMode).catch(() => null)) === 'plan') {
-    return 'card: plan mode is on, so no card was written, updated or closed; leave plan mode first.'
+    return 'card: plan mode was on at the last prompt or tool event, so no card was written, updated or closed. If plan mode has since been turned off, retry after the next tool call or prompt.'
   }
   const verdict = await $.tool.check({ tool: CARD, input }).catch(() => undefined)
   if (verdict?.decision !== 'deny') return undefined
