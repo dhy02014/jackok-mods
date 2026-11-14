@@ -4,7 +4,7 @@ import { START, MIRROR, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, 
 test('task_create’s description tells of the `#N` claim; task_update’s of reassigning', async ($, on) => {
   const { specText } = stub(on)
   await $.session.start(START)
-  expect(specText[0]).toContain('An Agent description like `#3 Trace the auth flow` claims task 3.')
+  expect(specText[0]).toContain('An Agent description starting `#3 ` claims task 3.')
   expect(specText[1]).toContain('`owner` reassigns ("" clears).')
   expect(specText.join('').length).toBeLessThan(1050)
 })

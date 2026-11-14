@@ -8,7 +8,7 @@ test('built-in tool descriptions stay as they are; task_create teaches the `#N` 
   await $.session.start(START)
   expect((await $.tool.describe({ tool: 'Agent', description: 'Launch an agent.' })).description).toBe('Launch an agent.')
   expect((await $.tool.describe({ tool: 'Bash', description: 'Run a command.' })).description).toBe('Run a command.')
-  expect(specText[0]).toContain('`#3 Trace the auth flow`')
+  expect(specText[0]).toContain('An Agent description starting `#3 ` claims task 3.')
   expect(specText[0]).toContain('not TaskCreate/TaskUpdate/TodoWrite')
 })
 
@@ -40,7 +40,7 @@ test('the three tools are registered in front with the built-ins’ required fie
   // once and save a whole tool call per batched update or create.
   expect(specText.join('').length).toBeLessThan(1050)
   // The spec teaches the `#N` claim.
-  expect(specText.join('')).toContain('`#3 Trace the auth flow` claims task 3')
+  expect(specText.join('')).toContain('starting `#3 ` claims task 3')
 })
 
 test('create → update → list: the pane, the tool results, the store and the mirror files agree', MIRROR, async ($, on) => {
@@ -147,6 +147,39 @@ test('on Windows the mirror lands under USERPROFILE, written in place, with no m
   expect(argvs).toContainEqual(['cmd', '/d', '/c', 'del', '/f', '/q', 'C:\\Users\\u\\.claude\\tasks\\sid-1\\2.json'])
   expect(argvs.filter(a => a[0] === 'mv' || a[0] === 'rm')).toEqual([])
   expect([...files.keys()].filter(p => p.endsWith('.tmp'))).toEqual([])
+})
+
+test('on Windows a CLAUDE_CONFIG_DIR with a trailing backslash holds the mirror', MIRROR, async ($, on) => {
+  const { files, writes, argvs } = stub(on, { env: { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u', CLAUDE_CONFIG_DIR: 'C:\\cfg\\' } })
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'One', description: 'd' })
+  await $.tool.call({ tool: CREATE, subject: 'Two', description: 'd' })
+  await $.tool.call({ tool: UPDATE, taskId: '2', status: 'deleted' })
+
+  expect(writes.some(p => p.endsWith('C:/cfg/tasks/sid-1/1.json'))).toBe(true)
+  expect(argvs).toContainEqual(['cmd', '/d', '/c', 'del', '/f', '/q', 'C:\\cfg\\tasks\\sid-1\\2.json'])
+  expect(argvs.filter(a => a[0] === 'mv' || a[0] === 'rm')).toEqual([])
+  expect([...files.keys()].filter(p => p.startsWith('/Users/u/.claude/tasks/'))).toEqual([])
+})
+
+test('turned on mid-list, the mirror leaves the ids minted before it alone and starts with the next create', MIRROR, async ($, on) => {
+  const task = (id: string) => ({ id, subject: `T${id}`, description: '', status: 'pending', blocks: [], blockedBy: [] })
+  const { files, argvs } = stub(on, {
+    store: { 'board:sid-1': { at: 1, lastId: 2, tasks: [task('1'), task('2')] } },
+    files: { [`${dirOf('sid-1')}/1.json`]: '{"subject":"theirs"}' },
+  })
+  await $.session.start(START)
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'completed' })
+  await $.tool.call({ tool: UPDATE, taskId: '2', status: 'deleted' })
+  expect(files.get(`${dirOf('sid-1')}/1.json`)).toBe('{"subject":"theirs"}')
+  expect(argvs.filter(a => a.some(x => /\/[12]\.json$/.test(x)))).toEqual([])
+
+  expect(said(await $.tool.call({ tool: CREATE, subject: 'Mirrored', description: '' }))).toBe('Created #3')
+  expect(JSON.parse(files.get(`${dirOf('sid-1')}/3.json`)!)).toMatchObject({ id: '3', subject: 'Mirrored' })
+  // Started, the mirror still skips the older ids.
+  await $.tool.call({ tool: UPDATE, updates: [{ taskId: '1', subject: 'Renamed' }, { taskId: '3', status: 'completed' }] })
+  expect(files.get(`${dirOf('sid-1')}/1.json`)).toBe('{"subject":"theirs"}')
+  expect(JSON.parse(files.get(`${dirOf('sid-1')}/3.json`)!)).toMatchObject({ status: 'completed' })
 })
 
 test('ids only climb: a deleted id is not reused, a /clear starts at 1, a resume continues past the store', async ($, on) => {

@@ -27,7 +27,7 @@ const OWNER_DESCRIPTION = ' `owner` reassigns ("" clears).'
 const CREATE_DESCRIPTION =
   'Track work as tasks; subject is required, status in_progress starts it now. Several go in one call as `tasks`, in order.' +
   ' Use these, not TaskCreate/TaskUpdate/TodoWrite: only these show in the pane.' +
-  ' An Agent description like `#3 Trace the auth flow` claims task 3.'
+  ' An Agent description starting `#3 ` claims task 3.'
 
 // Subject and activeForm are the person's to read, so they follow the settings' `language`; no language set:
 // no sentence. The pane's own words stay English (./strings).

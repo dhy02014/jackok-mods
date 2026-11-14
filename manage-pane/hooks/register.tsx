@@ -139,7 +139,9 @@ const STORE_PREFIX = 'board:'
 const BOARDS_KEPT = 50
 
 // `deleted`: ids this session's processes deleted. Ids are never reused, so a merge drops them for good.
-type Stored = { at: number; lastId: number; tasks: PaneTask[]; deleted?: string[] }
+// `mirrorFrom`: the first id minted with the mirror on. A lower id never consulted the
+// directory, so its file there may be another writer's: the mirror never touches it.
+type Stored = { at: number; lastId: number; tasks: PaneTask[]; deleted?: string[]; mirrorFrom?: number }
 
 const decimals = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && /^\d+$/.test(x)) : [])
 
@@ -153,7 +155,8 @@ const storedBoard = async ($: EngineInterface, sid: string) => {
       })
     : []
   const lastId = typeof raw.lastId === 'number' && Number.isInteger(raw.lastId) ? raw.lastId : 0
-  return { lastId: Math.max(lastId, 0, ...tasks.map(x => Number(x.id))), tasks, deleted: decimals(raw.deleted) }
+  const mirrorFrom = typeof raw.mirrorFrom === 'number' && Number.isInteger(raw.mirrorFrom) ? raw.mirrorFrom : undefined
+  return { lastId: Math.max(lastId, 0, ...tasks.map(x => Number(x.id))), tasks, deleted: decimals(raw.deleted), mirrorFrom }
 }
 
 // Drops the oldest lists past `keep`; `current`'s is never one of them.
@@ -240,16 +243,25 @@ const merged = (b: PaneBoard, stored: Awaited<ReturnType<typeof storedBoard>>, o
 
 // The board as written, merged with the store's copy and saved whole; the changed tasks written to the mirror, the deleted ones removed (`$.fs` has no delete: the OS `rm`, or
 // cmd's del on Windows), and a create's high-water mark. Returns the board as saved.
+// `mirrorFrom` starts the list's mirror at that id when the store holds no start yet.
 const persist = async (
   $: EngineInterface,
   b: PaneBoard,
-  o: { write?: readonly PaneTask[]; remove?: readonly string[]; highWater?: number },
+  o: { write?: readonly PaneTask[]; remove?: readonly string[]; highWater?: number; mirrorFrom?: number },
 ): Promise<PaneBoard> => {
   const sid = b.sessionId
   if (sid === null) return b
-  const m = merged(b, await storedBoard($, sid), o)
+  const stored = await storedBoard($, sid)
+  const m = merged(b, stored, o)
+  const mirrorFrom = stored?.mirrorFrom ?? o.mirrorFrom
   const key = `${STORE_PREFIX}${sid}`
-  const value = { at: Date.now(), lastId: m.board.lastId, tasks: m.board.tasks, deleted: m.deleted } satisfies Stored
+  const value = {
+    at: Date.now(),
+    lastId: m.board.lastId,
+    tasks: m.board.tasks,
+    deleted: m.deleted,
+    ...(mirrorFrom !== undefined ? { mirrorFrom } : {}),
+  } satisfies Stored
   const isSaved = await $.store.set(key, value).then(() => true, () => false)
   // The store is capped: a refused write makes room by dropping older sessions' lists, then tries once more.
   if (!isSaved) {
@@ -257,10 +269,12 @@ const persist = async (
     await $.store.set(key, value).catch(ignore)
   }
   const saved = await update($, board, cur => (cur.sessionId === sid ? m.board : cur))
+  if (mirrorFrom === undefined) return saved
   const dir = await taskDir($, sid)
   if (dir === undefined) return saved
-  for (const x of o.write ?? []) await writeAtomic($, `${dir}/${x.id}.json`, fileText(x)).catch(ignore)
-  for (const id of o.remove ?? []) {
+  const isOurs = (id: string) => Number(id) >= mirrorFrom
+  for (const x of (o.write ?? []).filter(x => isOurs(x.id))) await writeAtomic($, `${dir}/${x.id}.json`, fileText(x)).catch(ignore)
+  for (const id of (o.remove ?? []).filter(isOurs)) {
     const argv = removeArgv(`${dir}/${id}.json`)
     if (argv !== undefined) await $.process.run(argv).catch(ignore)
   }
@@ -600,8 +614,11 @@ export const register: Register = (on, options) => {
     const sid = await sessionId($)
     // Another process of the same session may have minted ids since this one loaded, and
     // the built-in TaskCreate may have written into the same directory.
-    const stored = sid === undefined ? 0 : ((await storedBoard($, sid))?.lastId ?? 0)
+    const kept = sid === undefined ? undefined : await storedBoard($, sid)
+    const stored = kept?.lastId ?? 0
     const mirrored = await mirroredMax($, sid).catch(() => 0)
+    // The mirror starts with this call's ids when none started it yet: they cleared the directory's.
+    const startsMirror = isMirrored && kept?.mirrorFrom === undefined
     const seen = { wasIdle: false }
     const local = await update($, board, b => {
       const cur = own(b, sid)
@@ -611,7 +628,11 @@ export const register: Register = (on, options) => {
       return { sessionId: cur.sessionId, lastId: first + items.length - 1, tasks: [...cur.tasks, ...made] }
     })
     const made = local.tasks.slice(-items.length)
-    const written = await persist($, local, { write: made, highWater: local.lastId })
+    const written = await persist($, local, {
+      write: made,
+      highWater: local.lastId,
+      ...(startsMirror ? { mirrorFrom: Number(made[0]!.id) } : {}),
+    })
     // The first task of a list reopens the pane; one the person closed mid-list stays
     // closed until the next list. /pane toggles it any time. The tab the person picked
     // stays put: the Task tab redraws from the board whether it is shown or not.
