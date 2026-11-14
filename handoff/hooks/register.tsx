@@ -124,7 +124,7 @@ const loadAll = async ($: EngineInterface, root: string) => {
 // a repo, the session's directory is the workspace. `isGit`: git resolved the root.
 const where = async ($: EngineInterface, cwd?: string) => {
   const at = slashed(cwd ?? (await $.session.cwd()))
-  const git = (args: string[]) => $.process.run(['git', ...args], { cwd: at }).catch(() => undefined)
+  const git = (args: string[]) => $.process.run(['git', '--no-optional-locks', ...args], { cwd: at }).catch(() => undefined)
   const r = await git(['rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel'])
   let root = r?.exitCode === 0 ? rootOf(r.stdout) : undefined
   if (r?.exitCode === 0 && root === undefined) {
@@ -212,7 +212,7 @@ const retireDoc = async (
   if (entry === undefined) return left('its folder could not be listed')
   if (entry.kind === 'dir') return left('it is a folder')
   if (!at.isGit) return left('no git repo here to confirm it is tracked')
-  const tracked = await $.process.run(['git', 'ls-files', '--error-unmatch', '--', plan.from], { cwd: root }).catch(() => undefined)
+  const tracked = await $.process.run(['git', '--no-optional-locks', 'ls-files', '--error-unmatch', '--', plan.from], { cwd: root }).catch(() => undefined)
   if (tracked?.exitCode !== 0) return left('git does not track it in this repo')
   const moved = await moveInto($, plan.from, `${root}/${CLOSED_DIR}`)
   if ('left' in moved) return left(moved.left)
@@ -223,9 +223,10 @@ const retireDoc = async (
   return isWritten ? line : `${line}\nThe closed card ${shown(closedAt)} still names its old doc path: its doc: line could not be edited.`
 }
 
-// A mod tool is answered ahead of the permission check and cannot open its dialog, so `card`
-// asks for the verdict itself: plan mode, or a `deny` from the rules or a tool.check hook,
-// refuses a write; `ask` goes through. An engine that cannot answer the check refuses nothing.
+// A mod tool is answered ahead of the permission check and does not prompt, so `card` asks
+// for the verdict itself: plan mode, or a `deny` from the rules or a tool.check hook, refuses
+// a write; an `ask` verdict proceeds. Both fail open: a mode never reported (no classic event
+// reaches this mod) and a check the engine cannot answer refuse nothing.
 const refusal = async ($: EngineInterface, input: Record<string, unknown>) => {
   if ((await read($, permissionMode).catch(() => null)) === 'plan') {
     return 'card: plan mode is on, so no card was written, updated or closed; leave plan mode first.'
@@ -236,18 +237,19 @@ const refusal = async ($: EngineInterface, input: Record<string, unknown>) => {
 }
 
 const noteMode = async ($: EngineInterface, e: { agent_id?: string; permission_mode?: string }) => {
-  if (e.agent_id === undefined && typeof e.permission_mode === 'string') {
-    await update($, permissionMode, () => e.permission_mode as string).catch(ignore)
-  }
+  const mode = e.permission_mode
+  if (e.agent_id !== undefined || typeof mode !== 'string') return
+  if ((await read($, permissionMode).catch(() => null)) !== mode) await update($, permissionMode, () => mode).catch(ignore)
 }
 
-// The line a created card's result gains when git would list the card folder as untracked.
+// The line a folder's first card gains when git would list the card folder as untracked:
+// said once, and never for a repo whose cards are already there (tracked or not).
 const unignoredNote = async ($: EngineInterface, root: string, path: string, dir: string) => {
   const r = await $.process
     .run(['git', '--no-optional-locks', 'check-ignore', '-q', '--', path], { cwd: root, ...RUN_LIMIT })
     .catch(() => undefined)
   return r?.exitCode === 1
-    ? `${dir}/ is not git-ignored, so git status lists the cards; to keep them local, add /${DIR}/ to .gitignore or .git/info/exclude.`
+    ? `${dir}/ is not git-ignored, so git status lists the cards. Tell the user they can add /${DIR}/ to .gitignore or .git/info/exclude to keep them local; do not edit either file unless asked.`
     : undefined
 }
 
@@ -330,11 +332,18 @@ export const register: Register = (on, options) => {
     await noteMode($, e)
     return done
   }).catch(($, e, next) => next(e))
+  on('classic.PostToolUseFailure', async ($, e, next) => {
+    const done = await next(e)
+    await noteMode($, e)
+    return done
+  }).catch(($, e, next) => next(e))
+  // No classic.PreToolUse: the engine raises every classic event but that one, which rides tool.call.
 
-  // Another session may have written or closed a card meanwhile.
+  // Another session may have written or closed a card meanwhile. Left running after the
+  // turn ends: its git probe never holds the turn, and its view write redraws the band.
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    if (e.agentId === undefined) await refresh($).catch(ignore)
+    if (e.agentId === undefined) void refresh($).catch(ignore)
     return done
   })
 
@@ -464,7 +473,7 @@ export const register: Register = (on, options) => {
       return { deny: `card: ${cardPath(shownDir(root, home), card)} already exists; no card written.` }
     }
     await $.fs.write(path, cardText(card))
-    const note = found === undefined && isGit ? await unignoredNote($, root, path, shownDir(root, home)) : undefined
+    const note = found === undefined && isGit && names.length === 0 ? await unignoredNote($, root, path, shownDir(root, home)) : undefined
     await refresh($).catch(ignore)
     await markTouched($)
     await remember($, e.tool_use_id, cardLines(card, found !== undefined ? t.rowUpdated : t.rowCreated))

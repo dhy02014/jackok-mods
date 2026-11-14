@@ -57,6 +57,8 @@ const stub = (
     dirtyPaths?: string[]
     // `git check-ignore` exits 1 for the card: no ignore rule covers handoff/ (0 otherwise).
     isCardDirUnignored?: boolean
+    // What `$.tool.check` answers for every call; 'ask' when left out.
+    check?: 'allow' | 'ask' | 'deny' | 'throw'
     isGitMissing?: boolean
     // Git before 2.31: rev-parse echoes the unknown --path-format and prints a relative common dir.
     isGitOld?: boolean
@@ -72,6 +74,7 @@ const stub = (
   mock.env(on, o.env ?? { HOME })
   mock.store(on)
   if (o.language !== undefined) on('settings.read', () => ({ value: { language: o.language } }))
+  const check = o.check ?? 'ask'
   const files = new Map(Object.entries(o.files ?? {}))
   const dirs = new Set<string>()
   const isDir = (d: string) => dirs.has(d) || [...files.keys(), ...dirs].some(p => p.startsWith(`${d}/`))
@@ -108,6 +111,15 @@ const stub = (
   on('classic.CwdChanged', () => ({}))
   on('classic.UserPromptSubmit', () => ({}))
   on('classic.PostToolUse', () => ({}))
+  on('classic.PostToolUseFailure', () => ({}))
+  // The engine's verdict for a card call: 'ask' as a session with no rule for the tool gives;
+  // 'throw' as an engine that cannot answer the check.
+  const checks: unknown[] = []
+  on('tool.check', ($, e) => {
+    checks.push(e)
+    if (check === 'throw') throw new Error('tool.check unavailable')
+    return { decision: check, reason: 'deny rule mcp__handoff__card' }
+  })
   on('fs.write', ($, e) => {
     files.set(norm(e.path), e.text)
     mtimes.set(norm(e.path), NOW)
@@ -160,8 +172,10 @@ const stub = (
       if (out === undefined) return done(128, 'fatal: not a git repository')
       const dirty = (e.init?.cwd ?? session.cwd) === MAIN ? (o.dirty ?? 0) : 0
       const top = out.split('\n').at(-1)!
-      // A flag before the subcommand (`--no-optional-locks`) leaves the subcommand next.
-      const sub = argv.find((a, i) => i > 0 && !a.startsWith('-'))
+      // Every git run the mod makes takes no optional locks (the subcommand follows the flag).
+      if (argv[1] !== '--no-optional-locks') return done(129, 'stub: git run without --no-optional-locks')
+      const args = argv.slice(1)
+      const sub = args[1]
       if (sub === 'check-ignore') return done(o.isCardDirUnignored === true ? 1 : 0)
       // `:(top,exclude)<dir>/` drops every listed path under <dir>/ at the repo root, as real git does.
       const excluded = argv.flatMap(a => /^:\(top,exclude\)(.+)$/.exec(a)?.[1] ?? [])
@@ -170,14 +184,14 @@ const stub = (
       const stdout =
         sub === 'status'
           ? Array.from({ length: dirty }, (_, i) => ` M f${i}\n`).join('') + paths.map(p => `?? ${p}\n`).join('')
-          : argv[1] === 'ls-files'
+          : sub === 'ls-files'
             ? `${argv.at(-1)}\n`
-            : o.isGitOld && argv.includes('--path-format=absolute')
+            : o.isGitOld && args.includes('--path-format=absolute')
               ? `--path-format=absolute\n.git\n${top}\n`
-              : argv.length === 3 && argv[2] === '--show-toplevel'
+              : args.length === 3 && args[2] === '--show-toplevel'
                 ? `${top}\n`
                 : `${out}\n`
-      if (argv[1] === 'ls-files' && o.untracked?.includes(argvNorm(argv.at(-1)!))) {
+      if (sub === 'ls-files' && o.untracked?.includes(argvNorm(argv.at(-1)!))) {
         return done(1, `error: pathspec '${argv.at(-1)}' did not match any file(s) known to git`)
       }
       return { value: { ...done(0).value, stdout } }
@@ -193,7 +207,7 @@ const stub = (
     const { Text } = $.ui.resolve(e)
     return <Text>below</Text>
   })
-  return { files, session, runs, limits, dirs, registered }
+  return { files, session, runs, limits, dirs, registered, checks }
 }
 
 const said = (r: { result?: unknown; text?: string; deny?: string }) => String(r.deny ?? r.text ?? r.result)
@@ -941,7 +955,7 @@ test('git before 2.31 echoes --path-format: rootOf refuses it and the toplevel s
   // The worktree's own toplevel, not a folder named after the echoed flag.
   expect(said(await $.tool.call({ tool: WRITE, title: 'Old', next: 'n' }))).toBe('Created ~/repo/.claude/worktrees/feat/handoff/2026-10-11-old.md')
   expect(files.has(`${WORKTREE}/handoff/2026-10-11-old.md`)).toBe(true)
-  expect(runs).toContainEqual(['git', 'rev-parse', '--show-toplevel'])
+  expect(runs).toContainEqual(['git', '--no-optional-locks', 'rev-parse', '--show-toplevel'])
 })
 
 test('a language setting leaves the mod’s own text English; only the card spec asks for that language', { options: { hold_on_exit: true } }, async ($, on) => {
@@ -1139,14 +1153,16 @@ test('with hold_on_exit on, a tree whose only change is handoff/ is not held', {
 
 // ---- what a card write may touch ----
 
-const NOT_IGNORED = '~/repo/handoff/ is not git-ignored, so git status lists the cards; to keep them local, add /handoff/ to .gitignore or .git/info/exclude.'
+const NOT_IGNORED =
+  '~/repo/handoff/ is not git-ignored, so git status lists the cards. Tell the user they can add /handoff/ to .gitignore or .git/info/exclude to keep them local; do not edit either file unless asked.'
 
-test('a card created where git does not ignore handoff/ says so once; .gitignore and .git are never written', async ($, on) => {
+test('the first card in a handoff/ git does not ignore says so, once; .gitignore and .git are never written', async ($, on) => {
   const { files, runs } = stub(on, { isCardDirUnignored: true })
   await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
   expect(said(await $.tool.call({ tool: WRITE, title: 'Local', next: 'n' }))).toBe(`Created ~/repo/handoff/2026-10-11-local.md\n${NOT_IGNORED}`)
   expect(runs).toContainEqual(['git', '--no-optional-locks', 'check-ignore', '-q', '--', `${CARDS}/2026-10-11-local.md`])
-  // Only a create asks: an update or a close says nothing more.
+  // The folder now has an entry: a second create, an update or a close says nothing more.
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Second', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-second.md')
   expect(said(await $.tool.call({ tool: WRITE, slug: 'local', next: 'm' }))).toBe('Updated ~/repo/handoff/2026-10-11-local.md')
   expect(runs.filter(r => r.includes('check-ignore'))).toHaveLength(1)
   expect([...files.keys()].filter(p => p.endsWith('.gitignore') || p.includes('/.git/'))).toEqual([])
@@ -1195,26 +1211,44 @@ test('plan mode, as the latest prompt or tool event reports it, refuses create, 
   expect(said(await $.tool.call({ tool: WRITE, title: 'New', next: 'n' }))).toMatch(/plan mode is on/)
   await $.classic.PostToolUse({ ...hookBase, permission_mode: 'acceptEdits', hook_event_name: 'PostToolUse' } as never)
   expect(said(await $.tool.call({ tool: WRITE, title: 'New', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-new.md')
+  // A failed tool reports the mode too.
+  await $.classic.PostToolUseFailure({ ...hookBase, permission_mode: 'plan', hook_event_name: 'PostToolUseFailure' } as never)
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Later', next: 'n' }))).toMatch(/plan mode is on/)
+  await $.classic.PostToolUseFailure({ ...hookBase, permission_mode: 'default', hook_event_name: 'PostToolUseFailure' } as never)
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Later', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-later.md')
 })
 
-test('a deny verdict for card refuses the write; ask and allow write it', async ($, on) => {
-  const { files } = stub(on)
-  let decision: 'deny' | 'ask' | 'allow' = 'deny'
-  const asked: unknown[] = []
-  on('tool.check', ($, e) => {
-    asked.push(e)
-    return { decision, reason: 'deny rule mcp__handoff__card' }
-  })
+test('a deny verdict for card refuses create, update and close; nothing is written', async ($, on) => {
+  const { files, checks } = stub(on, { check: 'deny', files: { [`${CARDS}/2026-10-10-seen.md`]: card({ title: 'Seen' }) } })
   await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
-  expect(said(await $.tool.call({ tool: WRITE, title: 'T', next: 'n' }))).toBe(
-    'card: a permission rule or hook denies this tool (deny rule mcp__handoff__card); no card changed.',
-  )
-  expect(files.size).toBe(0)
-  expect(asked[0]).toEqual({ tool: WRITE, input: { title: 'T', next: 'n' } })
-  decision = 'ask'
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Asked', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-asked.md')
-  decision = 'allow'
+  const before = new Map(files)
+  for (const call of [{ title: 'T', next: 'n' }, { slug: 'seen', next: 'm' }, { slug: 'seen', status: 'done' }]) {
+    expect(said(await $.tool.call({ tool: WRITE, ...call }))).toBe(
+      'card: a permission rule or hook denies this tool (deny rule mcp__handoff__card); no card changed.',
+    )
+  }
+  expect(files).toEqual(before)
+  expect(checks[0]).toEqual({ tool: WRITE, input: { title: 'T', next: 'n' } })
+})
+
+// 'ask' is the stub's default, so every other create test writes under an ask verdict.
+test('an allow verdict writes the card', async ($, on) => {
+  stub(on, { check: 'allow' })
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
   expect(said(await $.tool.call({ tool: WRITE, title: 'Allowed', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-allowed.md')
+})
+
+test('fails open: a permission check the engine cannot answer refuses nothing, and the card is written', async ($, on) => {
+  const { checks } = stub(on, { check: 'throw' })
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Unchecked', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-unchecked.md')
+  expect(checks).toHaveLength(1)
+})
+
+test('fails open: with no permission mode ever reported (no classic event reached the mod), card writes', async ($, on) => {
+  stub(on)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  expect(said(await $.tool.call({ tool: WRITE, title: 'No mode', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-no-mode.md')
 })
 
 test('the card spec asks for a card only when the user wants one, never on the model’s own initiative', () => {
