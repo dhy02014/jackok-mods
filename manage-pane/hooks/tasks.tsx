@@ -22,7 +22,12 @@ const UPDATE_FIELDS = {
 
 const UPDATE_DESCRIPTION =
   'taskId is required. Every field that changes goes in one call; several tasks go in one call as `updates`, in order, all or nothing.'
-const CLAIM_DESCRIPTION = ' An Agent description opening `#N ` claims task N itself; owner here reassigns ("" clears).'
+const OWNER_DESCRIPTION = ' `owner` reassigns ("" clears).'
+// The `#N` claim is taught here only: the built-in Agent description stays as it is.
+const CREATE_DESCRIPTION =
+  'Track work as tasks; subject is required, status in_progress starts it now. Several go in one call as `tasks`, in order.' +
+  ' Use these, not TaskCreate/TaskUpdate/TodoWrite: only these show in the pane.' +
+  ' An Agent description like `#3 Trace the auth flow` claims task 3.'
 
 // Subject and activeForm are the person's to read, so they follow the settings' `language`; no language set:
 // no sentence. The pane's own words stay English (./strings).
@@ -31,7 +36,7 @@ export const toolsFor = (o: { language?: unknown }) => {
   const inLang = lang === undefined ? '' : ` Write subject and activeForm in ${lang}.`
   return TOOLS.map(t =>
     t.name === 'task_update'
-      ? { ...t, description: UPDATE_DESCRIPTION + CLAIM_DESCRIPTION + inLang }
+      ? { ...t, description: UPDATE_DESCRIPTION + OWNER_DESCRIPTION + inLang }
       : t.name === 'task_create'
         ? { ...t, description: t.description + inLang }
         : t,
@@ -42,8 +47,7 @@ export const TOOLS = [
   {
     name: 'task_create',
     isDeferred: false,
-    description:
-      'Track work as tasks; subject is required, status in_progress starts it now. Several go in one call as `tasks`, in order.',
+    description: CREATE_DESCRIPTION,
     inputSchema: {
       type: 'object',
       properties: {
@@ -57,7 +61,7 @@ export const TOOLS = [
   {
     name: 'task_update',
     isDeferred: false,
-    description: UPDATE_DESCRIPTION + CLAIM_DESCRIPTION,
+    description: UPDATE_DESCRIPTION + OWNER_DESCRIPTION,
     inputSchema: {
       type: 'object',
       properties: {

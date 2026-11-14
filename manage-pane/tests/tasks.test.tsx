@@ -1,10 +1,11 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { START, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, spawn, opening, prompt, rows } from './helpers'
+import { START, MIRROR, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, spawn, opening, prompt, rows } from './helpers'
 
-test('task_update’s description tells of the `#N` claim', async ($, on) => {
+test('task_create’s description tells of the `#N` claim; task_update’s of reassigning', async ($, on) => {
   const { specText } = stub(on)
   await $.session.start(START)
-  expect(specText[1]).toContain('An Agent description opening `#N ` claims task N itself')
+  expect(specText[0]).toContain('An Agent description like `#3 Trace the auth flow` claims task 3.')
+  expect(specText[1]).toContain('`owner` reassigns ("" clears).')
   expect(specText.join('').length).toBeLessThan(1050)
 })
 
@@ -129,7 +130,7 @@ test('task_create with status in_progress starts the task in one call; any other
   expect(bad.deny).toContain('pending or in_progress')
 })
 
-test('task_update sets and clears an owner, in the list text, the store and the mirror', async ($, on) => {
+test('task_update sets and clears an owner, in the list text, the store and the mirror', MIRROR, async ($, on) => {
   const { json, file: fileJson } = stub(on)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Delegated', description: 'd' })

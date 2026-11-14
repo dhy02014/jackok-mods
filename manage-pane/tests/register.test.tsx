@@ -1,15 +1,28 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { START, HOME, dirOf, CREATE, UPDATE, LIST, stub, mountPane, said, SID2_BOARD, done, instructionStub, reminder, rows } from './helpers'
+import { START, HOME, MIRROR, dirOf, CREATE, UPDATE, LIST, stub, mountPane, said, SID2_BOARD, done, instructionStub, reminder, rows } from './helpers'
 import type { StoredBoard } from './helpers'
 
-test('the built-in Agent tool’s description gains the #N sentence; another tool’s does not', async ($, on) => {
-  stub(on)
+test('built-in tool descriptions stay as they are; task_create teaches the `#N` claim and replaces the built-in task tools', async ($, on) => {
+  const { specText } = stub(on)
   on('tool.describe', ($, e) => ({ description: e.description }))
   await $.session.start(START)
-  const agent = await $.tool.describe({ tool: 'Agent', description: 'Launch an agent.' })
-  expect(agent.description).toMatch(/^Launch an agent\. Start `description` with `#N `/)
-  expect(agent.description.length).toBeLessThan(200)
+  expect((await $.tool.describe({ tool: 'Agent', description: 'Launch an agent.' })).description).toBe('Launch an agent.')
   expect((await $.tool.describe({ tool: 'Bash', description: 'Run a command.' })).description).toBe('Run a command.')
+  expect(specText[0]).toContain('`#3 Trace the auth flow`')
+  expect(specText[0]).toContain('not TaskCreate/TaskUpdate/TodoWrite')
+})
+
+test('with mirror_task_files unset nothing is written under the tasks directory and no process runs', async ($, on) => {
+  const { files, writes, argvs, json } = stub(on, { files: { [`${dirOf('sid-1')}/5.json`]: '{}' } })
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'One' }, { subject: 'Two' }] })
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'completed' })
+  await $.tool.call({ tool: UPDATE, taskId: '2', status: 'deleted' })
+  // The CLI's own files there neither move the ids nor are touched.
+  expect(json('sid-1', '1')).toMatchObject({ subject: 'One', status: 'completed' })
+  expect(writes.filter(p => p.includes('/tasks/'))).toEqual([])
+  expect([...files.keys()]).toEqual([`${dirOf('sid-1')}/5.json`])
+  expect(argvs).toEqual([])
 })
 
 test('the three tools are registered in front with the built-ins’ required fields, kept small', async ($, on) => {
@@ -27,10 +40,10 @@ test('the three tools are registered in front with the built-ins’ required fie
   // once and save a whole tool call per batched update or create.
   expect(specText.join('').length).toBeLessThan(1050)
   // The spec teaches the `#N` claim.
-  expect(specText.join('')).toContain('#N')
+  expect(specText.join('')).toContain('`#3 Trace the auth flow` claims task 3')
 })
 
-test('create → update → list: the pane, the tool results, the store and the mirror files agree', async ($, on) => {
+test('create → update → list: the pane, the tool results, the store and the mirror files agree', MIRROR, async ($, on) => {
   const { opened, json, file: fileJson, files, argvs } = stub(on)
   await $.session.start(START)
   expect(opened).toEqual(['manage-pane'])
@@ -121,7 +134,7 @@ test('create → update → list: the pane, the tool results, the store and the 
   expect(files.get(`${dirOf('sid-1')}/.highwatermark`)).toBe('3')
 })
 
-test('on Windows the mirror lands under USERPROFILE, written in place, with no mv or rm', async ($, on) => {
+test('on Windows the mirror lands under USERPROFILE, written in place, with no mv or rm', MIRROR, async ($, on) => {
   const { files, writes, argvs } = stub(on, { env: { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u' } })
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'One', description: 'd' })
@@ -171,7 +184,7 @@ test('ids only climb: a deleted id is not reused, a /clear starts at 1, a resume
   expect(said(await $.tool.call({ tool: UPDATE, taskId: '4', status: 'completed' }))).toBe('Updated task #4 status')
 })
 
-test('a refused mirror write never fails the call; the pane still shows the task', async ($, on) => {
+test('a refused mirror write never fails the call; the pane still shows the task', MIRROR, async ($, on) => {
   stub(on, { isWriteRefused: true })
   await $.session.start(START)
   expect(said(await $.tool.call({ tool: CREATE, subject: 'Kept in state', description: '' }))).toBe(
@@ -297,14 +310,14 @@ test('a write keeps the tasks another process of the session stored, and drops w
   expect((store.get('board:sid-1') as StoredBoard).tasks.find(x => x.id === '3')).toMatchObject({ status: 'completed' })
 })
 
-test('the next id clears the ids the built-in TaskCreate left in the directory', async ($, on) => {
+test('the next id clears the ids the built-in TaskCreate left in the directory', MIRROR, async ($, on) => {
   const { files } = stub(on, { files: { [`${dirOf('sid-1')}/5.json`]: '{}', [`${dirOf('sid-1')}/.highwatermark`]: '7' } })
   await $.session.start(START)
   expect(said(await $.tool.call({ tool: CREATE, subject: 'After theirs', description: '' }))).toBe('Created #8')
   expect(files.get(`${dirOf('sid-1')}/.highwatermark`)).toBe('8')
 })
 
-test('CLAUDE_CODE_TASK_LIST_ID names the directory', async ($, on) => {
+test('CLAUDE_CODE_TASK_LIST_ID names the directory', MIRROR, async ($, on) => {
   const { files } = stub(on, { env: { HOME, CLAUDE_CODE_TASK_LIST_ID: 'shared-list' }, files: { [`${HOME}/.claude/tasks/shared-list/2.json`]: '{}' } })
   await $.session.start(START)
   expect(said(await $.tool.call({ tool: CREATE, subject: 'Shared', description: '' }))).toBe('Created #3')
@@ -312,7 +325,7 @@ test('CLAUDE_CODE_TASK_LIST_ID names the directory', async ($, on) => {
   expect(files.has(`${dirOf('sid-1')}/3.json`)).toBe(false)
 })
 
-test('a rename that fails writes the file in place and leaves no temp file', async ($, on) => {
+test('a rename that fails writes the file in place and leaves no temp file', MIRROR, async ($, on) => {
   const { files, argvs } = stub(on, { isMoveRefused: true })
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'In place', description: '' })

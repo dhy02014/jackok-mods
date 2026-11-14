@@ -10,6 +10,12 @@
       "title": "Open the pane at session start",
       "description": "Open the pane when an interactive session starts. Off: it opens with the first task of a list, or with /pane.",
       "default": true
+    },
+    "mirror_task_files": {
+      "type": "boolean",
+      "title": "Mirror tasks to the CLI task directory",
+      "description": "Also write each task to the CLI's task-list directory, for external readers.",
+      "default": false
     }
   }
 }

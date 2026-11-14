@@ -16,6 +16,9 @@ export const HOME = '/home/u'
 
 export const dirOf = (sid: string) => `${HOME}/.claude/tasks/${sid}`
 
+// The mirror is off by default; a test that reads the mirror files turns it on.
+export const MIRROR = { options: { mirror_task_files: true } } as const
+
 export const CREATE = 'mcp__manage-pane__task_create'
 
 export const UPDATE = 'mcp__manage-pane__task_update'

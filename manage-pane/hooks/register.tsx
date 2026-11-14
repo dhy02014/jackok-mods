@@ -43,17 +43,21 @@ import {
 // One pane, open at session start: the session's tasks on top, its subagents pinned
 // under them, and below them the instruction files the context carried with their load
 // counts; /pane opens or closes it. The task tools are served here; each session's list is
-// kept in `$.store` under its session id, so a resumed session picks it back up. Every change is also
-// written to ~/.claude/tasks/<session or CLAUDE_CODE_TASK_LIST_ID>/<id>.json in the CLI's own format.
+// kept in `$.store` under its session id, so a resumed session picks it back up. With the
+// `mirror_task_files` option on, every change is also written to
+// <config dir>/tasks/<session or CLAUDE_CODE_TASK_LIST_ID>/<id>.json in the CLI's own format.
 // The pure halves are ./tasks and ./agents; everything that touches `$` stays in this file,
 // the only one the engine follows it into.
 
 type Options = {
   open_on_start?: unknown
+  mirror_task_files?: unknown
 }
 
 // From `register`'s options; the defaults are the manifest's.
 let openOnStart = true
+// Off by default: the tasks directory is the CLI's, written only when the user asks for it.
+let isMirrored = false
 
 const t = EN
 
@@ -63,7 +67,6 @@ const CREATE = 'mcp__manage-pane__task_create'
 const UPDATE = 'mcp__manage-pane__task_update'
 const LIST = 'mcp__manage-pane__task_list'
 const AGENT = 'Agent'
-const AGENT_HINT = 'Start `description` with `#N ` (e.g. `#3 Trace the auth flow`), N the open manage-pane task the agent works.'
 
 const board = atom({ plugin: 'manage-pane', key: 'board' } as const, EMPTY, { shape: 'v2' })
 const blink = atom({ plugin: 'manage-pane', key: 'blink' } as const, false)
@@ -176,15 +179,24 @@ const homeOf = async ($: EngineInterface) => {
   return home === undefined || home === '' ? undefined : slashed(home)
 }
 
+// The CLI's config directory: CLAUDE_CONFIG_DIR when set, else <home>/.claude.
+const configRoot = async ($: EngineInterface) => {
+  const dir = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
+  if (dir !== undefined && dir !== '') return slashed(dir)
+  const home = await homeOf($)
+  return home === undefined ? undefined : `${home}/.claude`
+}
+
 // The CLI names the directory by CLAUDE_CODE_TASK_LIST_ID when it is set, so its own
 // TaskCreate and this mirror share one list. Only a plain name: it becomes a path segment.
+// Undefined while the mirror is off, which skips every write, delete and id read under it.
 const taskDir = async ($: EngineInterface, sid: string | null | undefined) => {
-  if (sid === undefined || sid === null) return undefined
-  const home = await homeOf($)
-  if (home === undefined) return undefined
+  if (!isMirrored || sid === undefined || sid === null) return undefined
+  const root = await configRoot($)
+  if (root === undefined) return undefined
   const listId = await $.env.get('CLAUDE_CODE_TASK_LIST_ID').catch(() => undefined)
   const name = listId !== undefined && /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(listId) ? listId : sid
-  return `${home}/.claude/tasks/${name}`
+  return `${root}/tasks/${name}`
 }
 
 // The highest id the mirror directory holds, a `<n>.json` or `.highwatermark`: the built-in
@@ -329,8 +341,8 @@ const agentDef = async ($: EngineInterface, type: string): Promise<AgentDef> => 
   if (known !== undefined) return known
   let found: AgentDef = { isWorktree: false }
   if (/^[A-Za-z0-9_-]+$/.test(type)) {
-    const home = await homeOf($)
-    for (const dir of [`${slashed(cwd)}/.claude/agents`, ...(home !== undefined ? [`${home}/.claude/agents`] : [])]) {
+    const root = await configRoot($)
+    for (const dir of [`${slashed(cwd)}/.claude/agents`, ...(root !== undefined ? [`${root}/agents`] : [])]) {
       const path = `${dir}/${type}.md`
       if (!(await $.fs.exists(path))) continue
       const file = await $.fs.read(path)
@@ -388,12 +400,7 @@ const claim = async ($: EngineInterface, taskId: string, agentId: string) => {
 export const register: Register = (on, options) => {
   const o = (options ?? {}) as Options
   openOnStart = flag(o.open_on_start, true)
-
-  // The built-in Agent tool carries no word of the `#N` claim; one sentence teaches it.
-  on('tool.describe', { tool: AGENT }, async ($, e, next) => {
-    const ran = await next(e)
-    return { ...ran, description: `${ran.description} ${AGENT_HINT}` }
-  }).catch(($, e, next) => next(e))
+  isMirrored = flag(o.mirror_task_files, false)
 
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'pane', description: t.commandDescription }).catch(ignore)
