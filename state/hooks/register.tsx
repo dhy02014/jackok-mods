@@ -90,7 +90,9 @@ const refreshSnap = async ($: EngineInterface, keepPlace = false) => {
       : { ctxPercent: cur?.ctxPercent, ctxTokens: cur?.ctxTokens, limits: cur?.limits ?? [], usd: cur?.usd }),
   }
   await update($, snap, cur => {
-    const next = mergePulled(pulled, cur, startedAt)
+    // Kept from the value as it is now, not as first read: a main-thread write may have landed since.
+    const own = keepPlace && cur !== null ? { ...pulled, model: cur.model, cwd: cur.cwd } : pulled
+    const next = mergePulled(own, cur, startedAt)
     return sameJson(next, cur) ? cur : next
   })
 }
@@ -111,7 +113,8 @@ const GIT_TIMEOUT_MS = 10_000
 const GIT_WATCHDOG_MS = GIT_TIMEOUT_MS + 5_000
 
 // No git on the machine, or a cwd outside a repo: the git part is left out.
-const refreshGit = async ($: EngineInterface, cwd?: string) => {
+// `isCurrent` false: the scheduler has given up on this run, so its figures are stale.
+const refreshGit = async ($: EngineInterface, cwd?: string, isCurrent: () => boolean = () => true) => {
   // An explicit cwd: a relative run resolves against the subagent whose event the hook handles.
   const dir = cwd ? slashed(cwd) : await mainCwd($)
   // `--no-optional-locks`: status otherwise refreshes the index under index.lock, which can
@@ -122,6 +125,7 @@ const refreshGit = async ($: EngineInterface, cwd?: string) => {
       : await $.process
           .run(['git', '--no-optional-locks', 'status', '--porcelain=v2', '--branch'], { cwd: dir, timeoutMs: GIT_TIMEOUT_MS })
           .catch(() => undefined)
+  if (!isCurrent()) return
   if (r === undefined || r.exitCode !== 0) {
     await update($, git, () => null)
     return
@@ -161,7 +165,7 @@ const scheduleGit = ($: EngineInterface, cwd?: string) => {
     const dir = gitCwd
     gitCwd = undefined
     $.clock.after(GIT_WATCHDOG_MS, () => release(run))
-    void refreshGit($, dir)
+    void refreshGit($, dir, () => run === gitRun)
       .catch(ignore)
       .finally(() => release(run))
       .catch(ignore)

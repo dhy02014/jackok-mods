@@ -49,7 +49,7 @@ Below 100 band columns the session id shows only its first 8 characters; pressin
 | :-- | :-- | :-- |
 | `per_model_limits` | off | Also shows per-model weekly limits, read every few minutes from the `https://api.anthropic.com/api/oauth/usage` endpoint with your Claude Code login. claude.ai subscriptions only. |
 
-What it touches: with `per_model_limits` off, no network request is made and only the limits Claude Code reports are shown. With it on, the endpoint is undocumented and may change or stop working without notice. It makes no request when `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set. The cached per-model figures are kept separately for each `CLAUDE_CONFIG_DIR`, so two logins on one machine never share them; a logout deletes that config directory's cached figures. `state` writes no files.
+What it touches: with `per_model_limits` off, no network request is made and only the limits Claude Code reports are shown. With it on, the endpoint is undocumented and may change or stop working without notice. It makes no request when `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set. The cached per-model figures are kept separately for each `CLAUDE_CONFIG_DIR`, so sessions with different config directories never share them; a logout deletes that config directory's cached figures. `state` writes no files of its own; the cached figures live in the plugin store Claude Code keeps for it.
 
 ## manage-pane
 

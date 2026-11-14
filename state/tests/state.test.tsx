@@ -406,6 +406,39 @@ test('a subagent’s turn end runs git in the main session’s cwd, with a timeo
   expect(inits.slice(before)).toEqual([{ cwd: '/home/u/proj', timeoutMs: 10_000 }])
 })
 
+test('a spawn heard in a subagent’s context keeps the main model and cwd on the band', async ($, on) => {
+  const o: StubOptions = {}
+  const clock = stub(on, o)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'a1' }))
+  await $.session.start(START)
+  await clock.settle()
+  // What the spawning subagent's own context would answer.
+  o.cwd = '/home/u/proj/.claude/worktrees/agent-1'
+  o.model = 'claude-haiku-4-5'
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' } as never)
+  const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: '~/proj' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Haiku/ })).toBeUndefined()
+})
+
+test('a worktree move on the main thread is where a later subagent turn end runs git', async ($, on) => {
+  const inits: StubOptions['inits'] = []
+  const o: StubOptions = { inits }
+  const clock = stub(on, o)
+  on('tool.call', { tool: 'EnterWorktree' }, () => ({ result: {} as never }))
+  await $.session.start(START)
+  await clock.settle()
+  o.cwd = '/home/u/proj/.claude/worktrees/wt'
+  await $.tool.call({ tool: 'EnterWorktree' } as never)
+  o.cwd = '/home/u/proj/.claude/worktrees/agent-1'
+  await $.turn.complete({ ...TURN, agentId: 'sub-1' })
+  await clock.advance(1)
+  await clock.settle()
+  await clock.advance(1)
+  await clock.settle()
+  expect(inits.at(-1)).toEqual({ cwd: '/home/u/proj/.claude/worktrees/wt', timeoutMs: 10_000 })
+})
+
 test('after a reset of every state value, with no session.start, the band pulls git in the session’s cwd', async ($, on) => {
   // Each test starts with every `$.state` value at its default, as /clear, /resume and /branch leave them.
   const inits: StubOptions['inits'] = []
