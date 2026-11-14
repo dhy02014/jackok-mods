@@ -91,8 +91,8 @@ export const restart = (a: PaneAgent, now: number): PaneAgent => {
   return { ...rest, isRunning: true, startedAt: now, recent: [] }
 }
 
-// A key an agent definition file's frontmatter pins (`effort:`, `isolation:`), if any.
-export const frontmatterIn = (file: string, key: 'effort' | 'isolation') => {
+// A key an agent definition file's frontmatter pins (`isolation:`), if any.
+export const frontmatterIn = (file: string, key: 'isolation') => {
   const m = new RegExp(`^${key}:[ \\t]*(?:"([^"]*)"|'([^']*)'|(\\S+))[ \\t]*$`, 'm').exec(file.split(/^---$/m)[1] ?? '')
   return m?.[1] ?? m?.[2] ?? m?.[3]
 }
@@ -269,13 +269,12 @@ export const busyOwner = (task: PaneTask, all: Readonly<Record<string, PaneAgent
 // A spawned agent as the pane first shows it; `cwd` is the session's, `e.cwd` relative to it.
 export const newAgent = (
   e: { subagentType: string; description: string; cwd?: string },
-  o: { model: string; effort: string | undefined; isWorktree: boolean; cwd: string; startedAt: number },
+  o: { model: string; isWorktree: boolean; cwd: string; startedAt: number },
 ): PaneAgent => {
   const dir = o.isWorktree ? undefined : e.cwd === undefined ? o.cwd : e.cwd.startsWith('/') || isWindowsPath(e.cwd) ? e.cwd :`${o.cwd}/${e.cwd}`
   return {
     type: e.subagentType,
     model: o.model,
-    effort: o.effort,
     ...(dir !== undefined ? { dir } : {}),
     ...(o.isWorktree ? { isWorktree: true as const } : {}),
     description: taskMarkOf(e.description).rest,

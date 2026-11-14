@@ -172,7 +172,14 @@ export const DEFS: Record<string, string> = {
 export const agentStub = (
   on: On,
   out: { files?: Map<string, string>; json?: (sid: string, id: string) => Record<string, unknown> | undefined; titles?: string[] } = {},
-  o: { env?: Record<string, string>; files?: Record<string, string>; language?: string; agentId?: (n: number) => string } = {},
+  o: {
+    env?: Record<string, string>
+    files?: Record<string, string>
+    language?: string
+    agentId?: (n: number) => string
+    /** The model a request's result says answered it; the one asked when unset. */
+    answeredBy?: string
+  } = {},
 ) => {
   const clock = mock.clock(on, { now: 0 })
   const s = stub(on, { files: o.files ?? DEFS, env: o.env, language: o.language })
@@ -181,6 +188,10 @@ export const agentStub = (
   on('turn.complete', () => ({ text: '' }))
   let n = 0
   on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: (n += 1, o.agentId?.(n) ?? `a${n}`) }))
+  on('turn.step', async function* ($, e) {
+    const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: o.answeredBy ?? e.model }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
+  })
   on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
   on('tool.call', { tool: 'Read' }, () => ({ result: { type: 'text', file: { filePath: '', content: '', numLines: 0, startLine: 1, totalLines: 0 } } }) as never)
   out.files = s.files
@@ -229,6 +240,21 @@ export const agentCall = ($: Fire, description: string, agentId?: string) =>
   $.tool.call({ tool: 'Agent', prompt: 'p', description, subagent_type: 'checker', ...(agentId !== undefined ? { agentId } : {}) } as never)
 
 export const spawn = ($: Fire, description: string) => $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description } as never)
+
+// One model request of a subagent (`agentId`) or of the main loop (undefined), read to its end.
+export const step = async ($: Fire, agentId: string | undefined, effort?: string, model = 'claude-sonnet-5-5') => {
+  const stream = $.turn.step({
+    turnId: 't',
+    index: 0,
+    model,
+    messageCount: 1,
+    ...(effort !== undefined ? { effort } : {}),
+    ...(agentId !== undefined ? { agentId } : {}),
+  } as never)
+  let s = await stream.next()
+  while (s.done !== true) s = await stream.next()
+  return s.value
+}
 
 export const listOf = async ($: Fire) => String((await $.tool.call({ tool: LIST })).result)
 

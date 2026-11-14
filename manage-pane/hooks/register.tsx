@@ -311,17 +311,17 @@ const agentHandback = async ($: EngineInterface, ran: ToolCallResult) => {
   return withContext(ran, handbackText(await currentTasks($).catch(() => []), [r.agentId]))
 }
 
-// ---- subagents' effort ----
+// ---- subagents' isolation ----
 
 // Run-scoped: a reload re-reads the definitions, which is what an edited agent
 // file wants. Keyed by cwd too, since project definitions differ per worktree.
-type AgentDef = { effort?: string; isWorktree: boolean }
+type AgentDef = { isWorktree: boolean }
 const defByType = new Map<string, AgentDef>()
 
-// The effort and isolation an agent type's definition pins (frontmatter), project
-// definitions over user ones. Neither `agent.spawn`, `$.agent.list()` nor a subagent's
-// `tool.call` carries the Agent tool's per-call `effort` (measured 2.1.294), so a
-// per-call override shows as the frontmatter value. Reads flat `<type>.md` files only.
+// The isolation an agent type's definition pins (frontmatter), project definitions over
+// user ones. Reads flat `<type>.md` files only: a plugin, nested, `--agents` or managed
+// definition reads as not isolated. Effort is never read here: the definition's is only
+// one input of the effective level (see the `turn.step` hook).
 const agentDef = async ($: EngineInterface, type: string): Promise<AgentDef> => {
   const cwd = await $.session.cwd()
   const key = `${cwd}\0${type}`
@@ -334,12 +334,20 @@ const agentDef = async ($: EngineInterface, type: string): Promise<AgentDef> => 
       const path = `${dir}/${type}.md`
       if (!(await $.fs.exists(path))) continue
       const file = await $.fs.read(path)
-      found = { effort: frontmatterIn(file, 'effort'), isWorktree: frontmatterIn(file, 'isolation') === 'worktree' }
+      found = { isWorktree: frontmatterIn(file, 'isolation') === 'worktree' }
       break
     }
   }
   defByType.set(key, found)
   return found
+}
+
+// A tracked agent's model and effort as its latest request had them; written only on a change,
+// since every request of every subagent passes here.
+const noteRun = async ($: EngineInterface, id: string, run: { model: string; effort: string | undefined }) => {
+  const a = (await read($, agents))[id]
+  if (a === undefined || (a.model === run.model && a.effort === run.effort)) return
+  await update($, agents, all => touch(all, id, x => ({ ...x, model: run.model, effort: run.effort })))
 }
 
 // Agent calls asking `isolation: 'worktree'`, by tool_use_id, which `agent.spawn` carries
@@ -447,13 +455,14 @@ export const register: Register = (on, options) => {
     if (ran.deny === undefined && ran.agentId !== undefined) {
       const id = ran.agentId
       const startedAt = await $.clock.now()
-      // The resolved model is known only here; $.agent.list() does not carry it.
+      // The model it starts on, resolved; $.agent.list() does not carry it. Its effort is
+      // unknown until its first request (`turn.step`), so none is drawn before.
       const model = ran.model ?? ''
       const def = await agentDef($, e.subagentType).catch((): AgentDef => ({ isWorktree: false }))
       // The call's `cwd` (relative to the session's) or the session's. An isolated agent's
       // worktree path is on no event while it runs, so it shows as `worktree`.
       const isWorktree = isolatedCalls.delete(e.tool_use_id) || def.isWorktree
-      const fresh = newAgent(e, { model, effort: def.effort, isWorktree, cwd: await $.session.cwd(), startedAt })
+      const fresh = newAgent(e, { model, isWorktree, cwd: await $.session.cwd(), startedAt })
       await update($, agents, all => keepLast({ ...all, [id]: fresh }))
       const { taskId } = taskMarkOf(e.description)
       if (taskId !== undefined && (await claim($, taskId, id).catch(() => false))) {
@@ -461,6 +470,21 @@ export const register: Register = (on, options) => {
       }
     }
     return ran
+  })
+
+  // A subagent's effort and model as its requests carry them: the engine's effective level
+  // (env override, per-call `effort`, definition, session, model support and caps applied),
+  // absent on a model without effort. A definition file would miss the per-call value,
+  // plugin and `--agents` definitions, and the caps. The answering model is the result's.
+  on('turn.step', async function* ($, e, next) {
+    const id = e.agentId
+    if (id === undefined) return yield* next(e)
+    const effort = typeof e.effort === 'string' ? e.effort : undefined
+    await noteRun($, id, { model: e.model, effort }).catch(ignore)
+    const res = yield* next(e)
+    const answered = (res.usage as { model?: unknown } | null | undefined)?.model
+    if (typeof answered === 'string' && answered !== '') await noteRun($, id, { model: answered, effort }).catch(ignore)
+    return res
   })
 
   // Registered before the task tools' hooks, so it is outer: a subagent's task_create is

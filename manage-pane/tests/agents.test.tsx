@@ -1,12 +1,13 @@
 import { expect, test } from 'claude-code/testing'
 import { cells } from '../hooks/strings'
-import { START, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, agentTool, agentCall, spawn, listOf, prompt } from './helpers'
+import { START, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, agentTool, agentCall, spawn, listOf, prompt, step } from './helpers'
 
 test('a running agent shows under its task: only the call it is on, no description row', async ($, on) => {
   const clock = agentStub(on)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Some task', description: 'd' })
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#1 Fix the parser', cwd: `${START.cwd}/.claude/worktrees/fix-parser` })
+  await step($, 'a1', 'medium')
   await $.tool.call({ tool: 'Bash', command: 'rg -n "x" /home/u/repo/src\nsecond line', agentId: 'a1' })
   await $.tool.call({ tool: 'Read', file_path: '/repo/src/parse.ts', agentId: 'a1' })
   await clock.advance(72_000)
@@ -179,6 +180,7 @@ test('an owned agent that finished is one dim line under its task, and its task 
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Owned work', description: 'd' })
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Does the owned work' })
+  await step($, 'a1', 'medium')
   await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
   await clock.advance(192_000)
   await $.turn.complete(done('a1'))
@@ -211,6 +213,7 @@ test('two Agent calls in one message naming the same task both pass; the first c
   await $.tool.call({ tool: CREATE, subject: 'Build', description: 'd' })
   await spawn($, '#1 First')
   await spawn($, '#1 Second')
+  await step($, 'a2', 'medium')
   expect(await listOf($)).toContain('#1 [in_progress] Build (owner: a1)')
   let ui = await mountPane($)
   expect(await ui.find({ key: 'pane-owned:a1' })).toBeDefined()
@@ -261,11 +264,13 @@ test('an agent’s directory follows its effort: the last two segments, cut befo
   for (const s of ['One', 'Two', 'Three', 'Four']) await $.tool.call({ tool: CREATE, subject: s, description: 'd' })
   // The session's directory is shown too, home as `~`.
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#1 Here' } as never)
+  await step($, 'a1', 'medium')
   let ui = await mountPane($)
   expect(await heads(ui)).toContain('◐ explorer Sonnet 5.5:medium  ~/proj')
   await ui.unmount()
 
   await $.agent.spawn({ prompt: 'p', subagentType: 'checker', description: '#2 Far', cwd: '/a/b/c/dddddddddddd' } as never)
+  await step($, 'a2', 'high')
   ui = await mountPane($)
   expect(await heads(ui)).toContain('◐ checker Sonnet 5.5:high  c/dddddddddddd')
   await ui.unmount()
@@ -283,6 +288,7 @@ test('an agent’s directory follows its effort: the last two segments, cut befo
   await $.tool.call({ tool: 'Agent', prompt: 'p', description: '#4 Call', subagent_type: 'explorer', isolation: 'worktree', tool_use_id: 'tu-4' } as never)
   // In a session the spawn runs inside that call; here it follows it, under the same tool_use_id.
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#4 Call', tool_use_id: 'tu-4' } as never)
+  await step($, 'a4', 'medium')
   ui = await mountRows($, 40)
   expect(await heads(ui)).toContain('◐ isolated Sonnet 5.5  worktree')
   expect(await heads(ui)).toContain('◐ explorer Sonnet 5.5:medium  worktree')
@@ -291,15 +297,50 @@ test('an agent’s directory follows its effort: the last two segments, cut befo
 test('on Windows the definition is read under USERPROFILE and paths read with `/` and `~`', async ($, on) => {
   agentStub(on, {}, {
     env: { OS: 'Windows_NT', USERPROFILE: 'C:\\Users\\u' },
-    files: { '/Users/u/.claude/agents/explorer.md': '---\nname: explorer\neffort: medium\n---\nbody\n' },
+    files: { '/Users/u/.claude/agents/isolated.md': '---\nname: isolated\nisolation: worktree\n---\nbody\n' },
   })
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Win', description: 'd' })
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#1 Here', cwd: 'C:\\Users\\u\\proj' } as never)
+  await step($, 'a1', 'medium')
   await $.tool.call({ tool: 'Read', file_path: 'C:\\Users\\u\\repo\\parse.ts', agentId: 'a1' })
-  const ui = await mountPane($)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'isolated', description: 'Def' } as never)
+  const ui = await mountRows($, 40)
   expect(await ui.find({ type: 'Text', text: /^◐ explorer Sonnet 5\.5:medium {2}~\/proj$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: '  · Read parse.ts' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: '◐ isolated Sonnet 5.5  worktree' })).toBeDefined()
+})
+
+test('an agent’s effort and model are what its requests carried, never a definition’s guess', async ($, on) => {
+  agentStub(on)
+  const head = async () => {
+    const ui = await mountRows($, 40)
+    const text = (await ui.find({ type: 'Text', text: /^◐ / }))?.text
+    await ui.unmount()
+    return text
+  }
+  await $.session.start(START)
+  // explorer.md pins `effort: medium`; before its first request the effort is unknown.
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Work' } as never)
+  expect(await head()).toBe('◐ explorer Sonnet 5.5  ~/proj')
+  // A per-call effort, an env override or a cap: the request's level wins over the file's.
+  await step($, 'a1', 'low')
+  expect(await head()).toBe('◐ explorer Sonnet 5.5:low  ~/proj')
+  // The main loop's requests leave the agent's row alone.
+  await step($, undefined, 'max', 'claude-opus-5-5')
+  expect(await head()).toBe('◐ explorer Sonnet 5.5:low  ~/proj')
+  // A model without effort carries none: the row drops it rather than keep a stale one.
+  await step($, 'a1', undefined, 'claude-haiku-5')
+  expect(await head()).toBe('◐ explorer Haiku 5  ~/proj')
+})
+
+test('a plugin agent’s effort is its requests’ too, and the model is the one that answered', async ($, on) => {
+  agentStub(on, {}, { answeredBy: 'claude-opus-5-5' })
+  await $.session.start(START)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'my-plugin:reviewer', description: 'Review' } as never)
+  await step($, 'a1', 'xhigh')
+  const ui = await mountRows($, 40)
+  expect(await ui.find({ type: 'Text', text: '◐ my-plugin:reviewer Opus 5.5:xhigh  ~/proj' })).toBeDefined()
 })
 
 test('a resumed agent runs again under its new task; the completed task keeps its frozen run', async ($, on) => {
@@ -310,6 +351,7 @@ test('a resumed agent runs again under its new task; the completed task keeps it
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'First', description: 'd' })
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Work' } as never)
+  await step($, 'a1', 'medium')
   await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
   await clock.advance(274_000)
   await $.turn.complete(done('a1'))
