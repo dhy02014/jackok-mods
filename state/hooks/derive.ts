@@ -39,11 +39,3 @@ export const parseGitStatus = (stdout: string): HudGit => {
     changed: lines.filter(l => !l.startsWith('#')).length,
   }
 }
-
-const FRONTMATTER_EFFORT = /^effort:[ \t]*(?:"([^"]*)"|'([^']*)'|(\S+))[ \t]*$/m
-
-// The `effort:` value in an agent definition's frontmatter.
-export const frontmatterEffort = (fileText: string) => {
-  const m = FRONTMATTER_EFFORT.exec(fileText.split(/^---$/m)[1] ?? '')
-  return m?.[1] ?? m?.[2] ?? m?.[3]
-}

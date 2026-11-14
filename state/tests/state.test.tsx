@@ -230,16 +230,43 @@ test('git status with CRLF line ends still parses', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: 'main* ↑2' })).toBeDefined()
 })
 
+// The engine's side of a model request: the model it names answers, unless `answered` says
+// another did (a reroute, or a placeholder); `null` is a result with no usage.
+const stepStub = (on: On, answered?: string | null) =>
+  on('turn.step', async function* ($, e) {
+    const usage =
+      answered === null ? null : { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: answered ?? e.model }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage } as never
+  })
+
+// One request of a subagent, read to its end.
+const agentStep = async ($: Parameters<Parameters<typeof test>[1]>[0], agentId: string, effort?: string, model = 'claude-sonnet-5-5') => {
+  const stream = $.turn.step({ turnId: 't', index: 0, model, messageCount: 1, agentId, ...(effort !== undefined ? { effort } : {}) } as never)
+  for await (const _ of stream) {
+    // drain
+  }
+}
+
+const agentsLine = async ($: Parameters<Parameters<typeof test>[1]>[0]) => {
+  const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
+  const line = (await ui.find({ type: 'Text', text: /^(explorer|checker|my-plugin)/ }))?.text
+  await ui.unmount()
+  return line
+}
+
 test('subagents show as an agents tally line by type and model; their live rows and calls stay off the band', async ($, on) => {
   stub(on, {
     files: { '/home/u/.claude/agents/explorer.md': '---\nname: explorer\neffort: high\n---\nbody\n' },
   })
+  stepStub(on)
   let next = 0
   on('agent.spawn', () => ({ model: next++ === 0 ? 'claude-sonnet-5-5' : 'claude-sonnet-5-4', agentId: `a${next}` }))
   await $.session.start(START)
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' })
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' })
-  // No definition file: no effort, so the model stands alone.
+  await agentStep($, 'a1', 'high', 'claude-sonnet-5-5')
+  await agentStep($, 'a2', 'high', 'claude-sonnet-5-4')
+  // No request yet: no effort, so the model stands alone.
   await $.agent.spawn({ prompt: 'p', subagentType: 'checker' })
   await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'a1' })
   // A long command is kept whole; only the terminal's edge cuts it.
@@ -479,6 +506,52 @@ test('pressing the cwd copies its full path, not the shortened label', async ($,
   const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
   await ui.press({ key: 'copy-cwd' })
   expect(copied).toEqual([START.cwd])
+})
+
+test('a subagent’s tally effort is its first request’s, never its definition file’s', async ($, on) => {
+  // explorer.md pins `effort: high`; the request carries the per-call `low`.
+  stub(on, { files: { '/home/u/.claude/agents/explorer.md': '---\nname: explorer\neffort: high\n---\nbody\n' } })
+  stepStub(on)
+  let n = 0
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `a${++n}` }))
+  await $.session.start(START)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' })
+  // Before a request the spawn counts with no effort.
+  expect(await agentsLine($)).toBe('explorer (Sonnet 5.5 x1)')
+  await agentStep($, 'a1', 'low')
+  expect(await agentsLine($)).toBe('explorer (Sonnet 5.5:low x1)')
+  // Later requests and the main loop's leave the count alone.
+  await agentStep($, 'a1', 'max')
+  const stream = $.turn.step({ turnId: 't', index: 0, model: 'claude-opus-5-5', effort: 'xhigh', messageCount: 1 })
+  for await (const _ of stream) {
+    // drain
+  }
+  expect(await agentsLine($)).toBe('explorer (Sonnet 5.5:low x1)')
+  // A request for an agent never spawned here counts nothing.
+  await agentStep($, 'zz', 'high')
+  expect(await agentsLine($)).toBe('explorer (Sonnet 5.5:low x1)')
+})
+
+test('a plugin agent counts under the model that answered its first request; a placeholder or no usage keeps the spawn’s', async ($, on) => {
+  stub(on)
+  let answered: string | null | undefined = 'claude-opus-5-5'
+  on('turn.step', async function* ($, e) {
+    const usage =
+      answered === null ? null : { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: answered ?? e.model }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage } as never
+  })
+  let n = 0
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `a${++n}` }))
+  await $.session.start(START)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'my-plugin:reviewer' })
+  await agentStep($, 'a1', 'xhigh')
+  answered = '<synthetic>'
+  await $.agent.spawn({ prompt: 'p', subagentType: 'my-plugin:reviewer' })
+  await agentStep($, 'a2', 'xhigh')
+  answered = null
+  await $.agent.spawn({ prompt: 'p', subagentType: 'my-plugin:reviewer' })
+  await agentStep($, 'a3', 'xhigh')
+  expect(await agentsLine($)).toBe('my-plugin:reviewer (Sonnet 5.5:xhigh x2, Opus 5.5:xhigh x1)')
 })
 
 test('the main loop effort comes from the model request', async ($, on) => {

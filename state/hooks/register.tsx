@@ -3,7 +3,7 @@ import type { EngineInterface, Register, RenderSurface } from 'claude-code'
 
 import type { HudAdvisor, HudLimit, HudSnap, HudTool, HudWeekly } from '../types'
 import { bandTree, formatReset, kTokens, short } from './band'
-import { frontmatterEffort, mergePulled, parseGitStatus, sameJson, targetOf, toLimits } from './derive'
+import { mergePulled, parseGitStatus, sameJson, targetOf, toLimits } from './derive'
 import { slashed } from './platform'
 import { clockTime, displayModel, seconds } from './format'
 import { t } from './strings'
@@ -206,30 +206,26 @@ const checkAlerts = async ($: EngineInterface, windows: readonly HudLimit[]) => 
 
 const ignore = () => undefined
 
-// Run-scoped: a reload re-reads the definitions, which is what an edited agent
-// file wants. Keyed by cwd too, since project definitions differ per worktree.
-const effortByType = new Map<string, string | undefined>()
+// A spawn counts at once under its type and start model with no effort: neither `agent.spawn`
+// nor `$.agent.list()` carries one, and a definition file's is only one input of it. Its
+// first request moves the count to the effort that request carried and the model that
+// answered. By agentId until then; run-scoped, so a reload leaves its pending ones uncounted.
+const tallyKey = (type: string, model: string, effort: string) => `${type}\t${model}\t${effort}`
+const firstStepOf = new Map<string, { type: string; model: string }>()
 
-// The effort an agent type's definition pins (`effort:` frontmatter), project
-// definitions over user ones. Neither `agent.spawn` nor `$.agent.list()` carries the
-// Agent tool's per-call `effort` (measured 2.1.294), so a per-call override shows as
-// the frontmatter value. Reads flat `<type>.md` files only.
-const agentEffort = async ($: EngineInterface, type: string) => {
-  const cwd = await $.session.cwd()
-  const key = `${cwd}\0${type}`
-  if (effortByType.has(key)) return effortByType.get(key)
-  let found: string | undefined
-  if (/^[A-Za-z0-9_-]+$/.test(type)) {
-    const home = await homeOf($)
-    for (const dir of [`${cwd}/.claude/agents`, ...(home !== undefined ? [`${home}/.claude/agents`] : [])]) {
-      const path = `${dir}/${type}.md`
-      if (!(await $.fs.exists(path))) continue
-      found = frontmatterEffort(await $.fs.read(path))
-      break
-    }
-  }
-  effortByType.set(key, found)
-  return found
+// `<synthetic>` and the like name a placeholder message, not a model.
+const answeringModel = (usage: unknown) => {
+  const m = (usage as { model?: unknown } | null | undefined)?.model
+  return typeof m === 'string' && m !== '' && !m.startsWith('<') ? m : undefined
+}
+
+const moveTally = async ($: EngineInterface, from: string, to: string) => {
+  if (from === to) return
+  await update($, agentTally, c => {
+    const { [from]: n = 0, ...rest } = c
+    if (n === 0) return c
+    return { ...rest, ...(n > 1 ? { [from]: n - 1 } : {}), [to]: (c[to] ?? 0) + 1 }
+  })
 }
 
 // Each step stands alone: a failed pull must not skip the minute redraw or the weekly fetch.
@@ -325,6 +321,7 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     const done = await next(e)
     if (e.reason === 'clear') {
+      firstStepOf.clear()
       await Promise.all([
         update($, history, () => []),
         update($, tools, () => []),
@@ -383,7 +380,23 @@ export const register: Register = (on, options) => {
       const v = e.effort === undefined ? null : String(e.effort)
       if (v !== (await read($, effort))) await update($, effort, () => v)
     }
-    const res = yield* next(e)
+    const agentId = e.agentId
+    const first = agentId !== undefined ? firstStepOf.get(agentId) : undefined
+    if (agentId !== undefined) firstStepOf.delete(agentId)
+    const res = yield* (async function* () {
+      try {
+        return yield* next(e)
+      } catch (err) {
+        // A request that never answered leaves the spawn pending for its next one.
+        if (agentId !== undefined && first !== undefined) firstStepOf.set(agentId, first)
+        throw err
+      }
+    })()
+    if (first !== undefined) {
+      const runEffort = typeof e.effort === 'string' ? e.effort : ''
+      const model = answeringModel(res.usage) ?? first.model
+      await moveTally($, tallyKey(first.type, first.model, ''), tallyKey(first.type, model, runEffort)).catch(ignore)
+    }
     // A stream cut short appends no result row: the step's end clears this loop's live call.
     await update($, advisor, a => (a.inFlight !== undefined && a.inFlight.agentId === e.agentId ? { ...a, inFlight: undefined } : a)).catch(ignore)
     await syncBlink($).catch(ignore)
@@ -433,14 +446,17 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  // Each spawn counts under its type and resolved model for the agents line; the live rows
-  // are the manage-pane mod's, in its pane. A resume is the same agent, already counted.
+  // Each spawn counts under its type and resolved model for the agents line, its effort
+  // filled in by its first request (`turn.step`); the live rows are the manage-pane mod's,
+  // in its pane. A resume is the same agent, already counted.
   on('agent.spawn', async ($, e, next) => {
     if (e.resume) return next(e)
     const ran = await next(e)
     if (ran.deny === undefined && ran.agentId !== undefined) {
-      const effort = (await agentEffort($, e.subagentType).catch(() => undefined)) ?? ''
-      const key = `${e.subagentType}\t${ran.model ?? ''}\t${effort}`
+      const model = ran.model ?? ''
+      // Before any await: the agent's first request can follow the spawn closely.
+      firstStepOf.set(ran.agentId, { type: e.subagentType, model })
+      const key = tallyKey(e.subagentType, model, '')
       await update($, agentTally, c => ({ ...c, [key]: (c[key] ?? 0) + 1 })).catch(ignore)
       await refreshSnap($).catch(ignore)
     }
