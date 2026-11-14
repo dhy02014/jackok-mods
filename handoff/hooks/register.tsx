@@ -16,6 +16,7 @@ import {
   freeName,
   freshFile,
   isAbsolute,
+  isNoProject,
   isSlug,
   listText,
   oneLine,
@@ -34,11 +35,12 @@ import { isWindowsPath, mkdirArgv, moveArgv, slashed } from './platform'
 import { t } from './strings'
 import { cardLines, closedLines, listLines, withText } from './toolrow'
 
-// Work left for a later session is a card in the workspace's handoff/ folder, committed
-// with the repo; this mod shows those cards in the band, points the model at them once per
-// session, and serves the tools that write, close and list them. Closing moves a card (and
-// its doc) into handoff/closed/; nothing is ever deleted. The pure half is ./cards and
-// ./band; everything that touches `$` stays in this file.
+// Work left for a later session is a card in the workspace's handoff/ folder: a local note,
+// not committed by default. The mod never edits .gitignore or .git; creating a card in a
+// folder git does not ignore says so instead. This mod shows the cards in the band, points
+// the model at them once per session, and serves the tools that write, close and list them.
+// Closing moves a card (and its doc) into handoff/closed/; nothing is ever deleted. The pure
+// half is ./cards and ./band; everything that touches `$` stays in this file.
 
 type Options = { hold_on_exit?: boolean }
 
@@ -63,10 +65,15 @@ const warnedFor = atom({ plugin: 'handoff', key: 'warnedFor' } as const, null)
 const toolRows = atom({ plugin: 'handoff', key: 'toolRows' } as const, {}, { shape: 'v1' })
 const ROWS_KEPT = 200
 
-// Uncommitted changes in the workspace: zero without git or outside a repo.
+// The main loop's latest permission mode as a classic event reported it; null before any.
+const permissionMode = atom({ plugin: 'handoff', key: 'permissionMode' } as const, null)
+
+// Uncommitted changes in the workspace: zero without git or outside a repo. The repo's own
+// card folder is left out (`:/` is the whole repo from any subfolder), so cards never count.
 const dirtyCount = async ($: EngineInterface) => {
-  const cwd = await $.session.cwd()
-  const git = await $.process.run(['git', 'status', '--porcelain'], { cwd }).catch(() => undefined)
+  const cwd = slashed(await $.session.cwd())
+  const argv = ['git', '--no-optional-locks', 'status', '--porcelain', '--', ':/', `:(top,exclude)${DIR}/`]
+  const git = await $.process.run(argv, { cwd }).catch(() => undefined)
   return git?.exitCode === 0 ? git.stdout.split('\n').filter(l => l.trim() !== '').length : 0
 }
 
@@ -216,6 +223,34 @@ const retireDoc = async (
   return isWritten ? line : `${line}\nThe closed card ${shown(closedAt)} still names its old doc path: its doc: line could not be edited.`
 }
 
+// A mod tool is answered ahead of the permission check and cannot open its dialog, so `card`
+// asks for the verdict itself: plan mode, or a `deny` from the rules or a tool.check hook,
+// refuses a write; `ask` goes through. An engine that cannot answer the check refuses nothing.
+const refusal = async ($: EngineInterface, input: Record<string, unknown>) => {
+  if ((await read($, permissionMode).catch(() => null)) === 'plan') {
+    return 'card: plan mode is on, so no card was written, updated or closed; leave plan mode first.'
+  }
+  const verdict = await $.tool.check({ tool: CARD, input }).catch(() => undefined)
+  if (verdict?.decision !== 'deny') return undefined
+  return `card: a permission rule or hook denies this tool${verdict.reason ? ` (${verdict.reason})` : ''}; no card changed.`
+}
+
+const noteMode = async ($: EngineInterface, e: { agent_id?: string; permission_mode?: string }) => {
+  if (e.agent_id === undefined && typeof e.permission_mode === 'string') {
+    await update($, permissionMode, () => e.permission_mode as string).catch(ignore)
+  }
+}
+
+// The line a created card's result gains when git would list the card folder as untracked.
+const unignoredNote = async ($: EngineInterface, root: string, path: string, dir: string) => {
+  const r = await $.process
+    .run(['git', '--no-optional-locks', 'check-ignore', '-q', '--', path], { cwd: root, ...RUN_LIMIT })
+    .catch(() => undefined)
+  return r?.exitCode === 1
+    ? `${dir}/ is not git-ignored, so git status lists the cards; to keep them local, add /${DIR}/ to .gitignore or .git/info/exclude.`
+    : undefined
+}
+
 // card with `status: done`: the card moves into handoff/closed/, and its doc beside it when
 // retireDoc allows.
 const retire = async ($: EngineInterface, slug: unknown, toolUseId: string | undefined) => {
@@ -283,6 +318,19 @@ export const register: Register = (on, options) => {
     return done
   }).catch(($, e, next) => next(e))
 
+  // The mode the person last set, as the main loop's prompt and tool events report it: a
+  // switch mid-turn reaches `card` at the next such event. A subagent's own mode is not kept.
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    const done = await next(e)
+    await noteMode($, e)
+    return done
+  }).catch(($, e, next) => next(e))
+  on('classic.PostToolUse', async ($, e, next) => {
+    const done = await next(e)
+    await noteMode($, e)
+    return done
+  }).catch(($, e, next) => next(e))
+
   // Another session may have written or closed a card meanwhile.
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
@@ -330,9 +378,12 @@ export const register: Register = (on, options) => {
   // ---- the tools ----
 
   on('tool.call', { tool: CARD }, async ($, e) => {
-    for (const k of ['title', 'next', 'summary', 'status', 'body', 'doc', 'slug'] as const) {
+    const FIELDS = ['title', 'next', 'summary', 'status', 'body', 'doc', 'slug'] as const
+    for (const k of FIELDS) {
       if (e[k] !== undefined && typeof e[k] !== 'string') return { deny: `card: ${k} must be a string.` }
     }
+    const refused = await refusal($, Object.fromEntries(FIELDS.filter(k => e[k] !== undefined).map(k => [k, e[k]])))
+    if (refused !== undefined) return { deny: refused }
     if (e.status === 'done') return retire($, e.slug, e.tool_use_id)
     if (e.status !== undefined && asStatus(e.status) === undefined) {
       return { deny: `Unknown status "${String(e.status)}": use open, hold or done.` }
@@ -342,7 +393,7 @@ export const register: Register = (on, options) => {
     }
     const home = await homeOf($)
     if (home === undefined) return { deny: 'handoff: HOME/USERPROFILE is unset; no card written.' }
-    const { root } = await where($)
+    const { root, isGit } = await where($)
     const doc = typeof e.doc === 'string' ? (e.doc.trim() === '' ? null : tildify(expandHome(e.doc.trim(), home), home)) : undefined
     const body = typeof e.body === 'string' ? e.body.trim() : undefined
     const summary = typeof e.summary === 'string' ? oneLine(e.summary) : undefined
@@ -372,6 +423,9 @@ export const register: Register = (on, options) => {
         body: body ?? found.body,
       }
     } else {
+      if (!isGit && isNoProject(root, home)) {
+        return { deny: `card: ${tildify(root, home)} is the home folder or a filesystem root, not a project; start the session in a project folder to write a card.` }
+      }
       const title = str(e.title)
       const next = str(e.next)
       if (title === undefined || next === undefined) {
@@ -410,10 +464,12 @@ export const register: Register = (on, options) => {
       return { deny: `card: ${cardPath(shownDir(root, home), card)} already exists; no card written.` }
     }
     await $.fs.write(path, cardText(card))
+    const note = found === undefined && isGit ? await unignoredNote($, root, path, shownDir(root, home)) : undefined
     await refresh($).catch(ignore)
     await markTouched($)
     await remember($, e.tool_use_id, cardLines(card, found !== undefined ? t.rowUpdated : t.rowCreated))
-    return { result: `${found !== undefined ? 'Updated' : 'Created'} ${cardPath(shownDir(root, home), card)}` }
+    const done = `${found !== undefined ? 'Updated' : 'Created'} ${cardPath(shownDir(root, home), card)}`
+    return { result: note === undefined ? done : `${done}\n${note}` }
   }).catch(failed)
 
   on('tool.call', { tool: LIST }, async ($, e) => {

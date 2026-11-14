@@ -39,7 +39,7 @@ export const TOOLS = [
     name: 'card',
     isDeferred: false,
     description:
-      'Create, update or close a handoff card (work left for a later session) in this repo\'s handoff/ folder (the session\'s directory outside git). Call it when work remains at session end, or when the user asks for a handoff; give `title` and `next` (both required) to create, `slug` to update, `slug` with `status: done` to close. A long body may live in a doc referenced by `doc` instead.',
+      'Create, update or close a handoff card (work left for a later session) in this repo\'s handoff/ folder (the session\'s directory outside git). Call it only when the user asks for a handoff or to save work for a later session; give `title` and `next` (both required) to create, `slug` to update, `slug` with `status: done` to close. A long body may live in a doc referenced by `doc` instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -113,6 +113,9 @@ const docAt = (doc: string, home: string | undefined) =>
   home !== undefined ? slashed(expandHome(doc, home)) : doc.startsWith('~') ? undefined : slashed(doc)
 
 const samePath = (a: string, b: string) => isUnder(a, b) && isUnder(b, a)
+
+// The home folder or a filesystem root (`/`, `C:/`): outside git, no project to hold cards.
+export const isNoProject = (root: string, home: string) => samePath(root, home) || /^(?:[A-Za-z]:)?\/*$/.test(slashed(root))
 
 // One path holds the other, either way round, or both are the same.
 const overlaps = (a: string, b: string) => isUnder(a, b) || isUnder(b, a)

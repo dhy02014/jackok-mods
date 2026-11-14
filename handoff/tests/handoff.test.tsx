@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { cardAge, cardText, freeName, isStale, NEXT_CELLS, parseCard, rootOf, TITLE_CELLS, TOOLS, toolsFor, tooWide } from '../hooks/cards'
+import { cardAge, cardText, freeName, isNoProject, isStale, NEXT_CELLS, parseCard, rootOf, TITLE_CELLS, TOOLS, toolsFor, tooWide } from '../hooks/cards'
 import { cells } from '../hooks/cells'
 
 const BAND = {
@@ -53,6 +53,10 @@ const stub = (
     git?: Record<string, string>
     // Lines `git status --porcelain` prints in MAIN; every other repo is clean.
     dirty?: number
+    // Paths `git status --porcelain` lists as untracked in MAIN, honouring an exclude pathspec.
+    dirtyPaths?: string[]
+    // `git check-ignore` exits 1 for the card: no ignore rule covers handoff/ (0 otherwise).
+    isCardDirUnignored?: boolean
     isGitMissing?: boolean
     // Git before 2.31: rev-parse echoes the unknown --path-format and prints a relative common dir.
     isGitOld?: boolean
@@ -102,6 +106,8 @@ const stub = (
   })
   on('turn.complete', () => ({ text: '' }))
   on('classic.CwdChanged', () => ({}))
+  on('classic.UserPromptSubmit', () => ({}))
+  on('classic.PostToolUse', () => ({}))
   on('fs.write', ($, e) => {
     files.set(norm(e.path), e.text)
     mtimes.set(norm(e.path), NOW)
@@ -154,9 +160,16 @@ const stub = (
       if (out === undefined) return done(128, 'fatal: not a git repository')
       const dirty = (e.init?.cwd ?? session.cwd) === MAIN ? (o.dirty ?? 0) : 0
       const top = out.split('\n').at(-1)!
+      // A flag before the subcommand (`--no-optional-locks`) leaves the subcommand next.
+      const sub = argv.find((a, i) => i > 0 && !a.startsWith('-'))
+      if (sub === 'check-ignore') return done(o.isCardDirUnignored === true ? 1 : 0)
+      // `:(top,exclude)<dir>/` drops every listed path under <dir>/ at the repo root, as real git does.
+      const excluded = argv.flatMap(a => /^:\(top,exclude\)(.+)$/.exec(a)?.[1] ?? [])
+      const listed = (e.init?.cwd ?? session.cwd) === MAIN ? (o.dirtyPaths ?? []) : []
+      const paths = listed.filter(p => !excluded.some(x => p.startsWith(x)))
       const stdout =
-        argv[1] === 'status'
-          ? Array.from({ length: dirty }, (_, i) => ` M f${i}\n`).join('')
+        sub === 'status'
+          ? Array.from({ length: dirty }, (_, i) => ` M f${i}\n`).join('') + paths.map(p => `?? ${p}\n`).join('')
           : argv[1] === 'ls-files'
             ? `${argv.at(-1)}\n`
             : o.isGitOld && argv.includes('--path-format=absolute')
@@ -1105,6 +1118,109 @@ test('with hold_on_exit on, a clean tree or a session that wrote a card is not h
   session.id = 'sid-2'
   session.cwd = `${HOME}/clean`
   expect((await run('clear')).text).toBe('core')
+})
+
+test('with hold_on_exit on, changes only in the card folder are not uncommitted work', { options: { hold_on_exit: true } }, async ($, on) => {
+  const { runs } = stub(on, { dirtyPaths: ['handoff/', 'src/app.ts'] })
+  on('command.run', () => ({ text: 'core' }))
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  const run = (command: string) => $.command.run({ command, args: '', origin: { kind: 'composer' }, presentation: {} as never })
+  // handoff/ is left out by the pathspec: one change counts, not two.
+  expect((await run('clear')).text).toMatch(/^1 uncommitted change/)
+  expect(runs.find(r => r.includes('status'))).toEqual(['git', '--no-optional-locks', 'status', '--porcelain', '--', ':/', ':(top,exclude)handoff/'])
+})
+
+test('with hold_on_exit on, a tree whose only change is handoff/ is not held', { options: { hold_on_exit: true } }, async ($, on) => {
+  stub(on, { dirtyPaths: ['handoff/'] })
+  on('command.run', () => ({ text: 'core' }))
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  expect((await $.command.run({ command: 'exit', args: '', origin: { kind: 'composer' }, presentation: {} as never })).text).toBe('core')
+})
+
+// ---- what a card write may touch ----
+
+const NOT_IGNORED = '~/repo/handoff/ is not git-ignored, so git status lists the cards; to keep them local, add /handoff/ to .gitignore or .git/info/exclude.'
+
+test('a card created where git does not ignore handoff/ says so once; .gitignore and .git are never written', async ($, on) => {
+  const { files, runs } = stub(on, { isCardDirUnignored: true })
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Local', next: 'n' }))).toBe(`Created ~/repo/handoff/2026-10-11-local.md\n${NOT_IGNORED}`)
+  expect(runs).toContainEqual(['git', '--no-optional-locks', 'check-ignore', '-q', '--', `${CARDS}/2026-10-11-local.md`])
+  // Only a create asks: an update or a close says nothing more.
+  expect(said(await $.tool.call({ tool: WRITE, slug: 'local', next: 'm' }))).toBe('Updated ~/repo/handoff/2026-10-11-local.md')
+  expect(runs.filter(r => r.includes('check-ignore'))).toHaveLength(1)
+  expect([...files.keys()].filter(p => p.endsWith('.gitignore') || p.includes('/.git/'))).toEqual([])
+})
+
+test('a card created where git ignores handoff/, or outside git, gets no note', async ($, on) => {
+  const PLAIN = `${HOME}/plain`
+  const { runs, session } = stub(on)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Ignored', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-ignored.md')
+  session.cwd = PLAIN
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Plain', next: 'n' }))).toBe('Created ~/plain/handoff/2026-10-11-plain.md')
+  expect(runs.filter(r => r.includes('check-ignore'))).toHaveLength(1)
+})
+
+test('outside git, the home folder or a filesystem root is no place for a card; a repo at home is', async ($, on) => {
+  const { files, session } = stub(on, { cwd: HOME })
+  await $.session.start({ cwd: HOME, surface: 'terminal', isInteractive: true })
+  expect(said(await $.tool.call({ tool: WRITE, title: 'T', next: 'n' }))).toBe(
+    'card: ~ is the home folder or a filesystem root, not a project; start the session in a project folder to write a card.',
+  )
+  session.cwd = '/'
+  expect(said(await $.tool.call({ tool: WRITE, title: 'T', next: 'n' }))).toMatch(/^card: \/ is the home folder or a filesystem root/)
+  expect(files.size).toBe(0)
+  expect([isNoProject('C:\\', 'C:/Users/u'), isNoProject('c:/users/u', 'C:/Users/u'), isNoProject('C:/Users/u/p', 'C:/Users/u')]).toEqual([true, true, false])
+})
+
+test('a git repo at home still takes a card', async ($, on) => {
+  stub(on, { cwd: HOME, git: { [HOME]: `${HOME}/.git\n${HOME}` } })
+  await $.session.start({ cwd: HOME, surface: 'terminal', isInteractive: true })
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Dots', next: 'n' }))).toBe('Created ~/handoff/2026-10-11-dots.md')
+})
+
+const hookBase = { session_id: 'sid-1', transcript_path: '/t.jsonl', cwd: MAIN }
+
+test('plan mode, as the latest prompt or tool event reports it, refuses create, update and close; a subagent’s mode is not kept', async ($, on) => {
+  const { files } = stub(on, { files: { [`${CARDS}/2026-10-10-seen.md`]: card({ title: 'Seen' }) } })
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  await $.classic.UserPromptSubmit({ ...hookBase, permission_mode: 'plan', hook_event_name: 'UserPromptSubmit', prompt: 'p' } as never)
+  const before = new Map(files)
+  for (const call of [{ title: 'New', next: 'n' }, { slug: 'seen', next: 'm' }, { slug: 'seen', status: 'done' }]) {
+    expect(said(await $.tool.call({ tool: WRITE, ...call }))).toBe('card: plan mode is on, so no card was written, updated or closed; leave plan mode first.')
+  }
+  expect(files).toEqual(before)
+  await $.classic.PostToolUse({ ...hookBase, agent_id: 'a1', permission_mode: 'default', hook_event_name: 'PostToolUse' } as never)
+  expect(said(await $.tool.call({ tool: WRITE, title: 'New', next: 'n' }))).toMatch(/plan mode is on/)
+  await $.classic.PostToolUse({ ...hookBase, permission_mode: 'acceptEdits', hook_event_name: 'PostToolUse' } as never)
+  expect(said(await $.tool.call({ tool: WRITE, title: 'New', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-new.md')
+})
+
+test('a deny verdict for card refuses the write; ask and allow write it', async ($, on) => {
+  const { files } = stub(on)
+  let decision: 'deny' | 'ask' | 'allow' = 'deny'
+  const asked: unknown[] = []
+  on('tool.check', ($, e) => {
+    asked.push(e)
+    return { decision, reason: 'deny rule mcp__handoff__card' }
+  })
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  expect(said(await $.tool.call({ tool: WRITE, title: 'T', next: 'n' }))).toBe(
+    'card: a permission rule or hook denies this tool (deny rule mcp__handoff__card); no card changed.',
+  )
+  expect(files.size).toBe(0)
+  expect(asked[0]).toEqual({ tool: WRITE, input: { title: 'T', next: 'n' } })
+  decision = 'ask'
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Asked', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-asked.md')
+  decision = 'allow'
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Allowed', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-allowed.md')
+})
+
+test('the card spec asks for a card only when the user wants one, never on the model’s own initiative', () => {
+  const card = TOOLS.find(t => t.name === 'card')!.description
+  expect(card).toMatch(/only when the user asks for a handoff or to save work for a later session/)
+  expect(card).not.toMatch(/session end|when work remains/)
 })
 
 test('the model-facing specs stay small, language suffix included, and name no workflow', () => {
