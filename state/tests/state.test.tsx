@@ -554,6 +554,80 @@ test('a plugin agent counts under the model that answered its first request; a p
   expect(await agentsLine($)).toBe('my-plugin:reviewer (Sonnet 5.5:xhigh x2, Opus 5.5:xhigh x1)')
 })
 
+// A subagent spawns as a1, a2, ... on Sonnet 5.5; `fail` makes the next request throw.
+const tallyStub = (on: On, o: { fail?: boolean; isStreamed?: boolean } = {}) => {
+  stub(on)
+  on('session.end', () => ({ sessionId: 'sid-1' }))
+  on('turn.step', async function* ($, e) {
+    if (o.isStreamed === true) yield { kind: 'text', index: 0, text: 'ok' }
+    if (o.fail === true) {
+      o.fail = false
+      throw new Error('overloaded')
+    }
+    const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: e.model }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage } as never
+  })
+  let n = 0
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `a${++n}` }))
+}
+
+const openStep = ($: Parameters<Parameters<typeof test>[1]>[0], agentId: string, effort: string) =>
+  $.turn.step({ turnId: 't', index: 0, model: 'claude-sonnet-5-5', messageCount: 1, agentId, effort } as never)
+
+test('a first request that throws leaves the spawn waiting; the next one records its effort', async ($, on) => {
+  const o = { fail: true }
+  tallyStub(on, o)
+  await $.session.start(START)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' } as never)
+  await expect(agentStep($, 'a1', 'high')).rejects.toThrow()
+  expect(await agentsLine($)).toBe('explorer (Sonnet 5.5 x1)')
+  await agentStep($, 'a1', 'low')
+  expect(await agentsLine($)).toBe('explorer (Sonnet 5.5:low x1)')
+})
+
+test('a first request whose reader lets go of the stream leaves the spawn waiting', async ($, on) => {
+  tallyStub(on, { isStreamed: true })
+  await $.session.start(START)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' } as never)
+  const stream = openStep($, 'a1', 'high')
+  expect((await stream.next()).done).toBe(false)
+  await stream.return(undefined as never)
+  expect(await agentsLine($)).toBe('explorer (Sonnet 5.5 x1)')
+  await agentStep($, 'a1', 'low')
+  expect(await agentsLine($)).toBe('explorer (Sonnet 5.5:low x1)')
+})
+
+for (const reason of ['clear', 'resume'] as const) {
+  test(`after a ${reason}, an older agent’s first request moves no count of the new tally`, async ($, on) => {
+    tallyStub(on)
+    await $.session.start(START)
+    await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' } as never)
+    await $.session.end({ reason, sessionId: 'sid-1', resume: {} as never })
+    await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' } as never)
+    await agentStep($, 'a1', 'low')
+    // The engine empties every `$.state` value, the tally too, on /resume and /branch; the
+    // test kit does not, so a1's count stays here, unmoved. Either way no `low` appears.
+    const before = reason === 'clear' ? 'explorer (Sonnet 5.5 x1)' : 'explorer (Sonnet 5.5 x2)'
+    expect(await agentsLine($)).toBe(before)
+    await agentStep($, 'a2', 'high')
+    expect(await agentsLine($)).toBe(reason === 'clear' ? 'explorer (Sonnet 5.5:high x1)' : 'explorer (Sonnet 5.5 x1, high x1)')
+  })
+}
+
+test('a request under way across a /clear moves no count of the new tally', async ($, on) => {
+  tallyStub(on, { isStreamed: true })
+  await $.session.start(START)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' } as never)
+  const stream = openStep($, 'a1', 'low')
+  expect((await stream.next()).done).toBe(false)
+  await $.session.end({ reason: 'clear', sessionId: 'sid-1', resume: {} as never })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' } as never)
+  while ((await stream.next()).done !== true) {
+    // drain
+  }
+  expect(await agentsLine($)).toBe('explorer (Sonnet 5.5 x1)')
+})
+
 test('the main loop effort comes from the model request', async ($, on) => {
   stub(on)
   on('turn.step', async function* ($, e) {

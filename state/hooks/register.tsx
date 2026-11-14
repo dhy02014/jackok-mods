@@ -209,9 +209,12 @@ const ignore = () => undefined
 // A spawn counts at once under its type and start model with no effort: neither `agent.spawn`
 // nor `$.agent.list()` carries one, and a definition file's is only one input of it. Its
 // first request moves the count to the effort that request carried and the model that
-// answered. By agentId until then; run-scoped, so a reload leaves its pending ones uncounted.
+// answered. By agentId until then; run-scoped, so a reload leaves its pending ones counted
+// with no effort. `gen` is the tally a spawn counted in: a /clear, /resume or /branch starts a
+// new one, and a request already under way then must not move a count of the new one.
 const tallyKey = (type: string, model: string, effort: string) => `${type}\t${model}\t${effort}`
-const firstStepOf = new Map<string, { type: string; model: string }>()
+const firstStepOf = new Map<string, { type: string; model: string; gen: number }>()
+let tallyGen = 0
 
 // `<synthetic>` and the like name a placeholder message, not a model.
 const answeringModel = (usage: unknown) => {
@@ -320,8 +323,13 @@ export const register: Register = (on, options) => {
   // conversation's state. State writes only; the hook's budget is short.
   on('session.end', async ($, e, next) => {
     const done = await next(e)
-    if (e.reason === 'clear') {
+    // The engine resets every `$.state` value, the tally included, on /clear, /resume and
+    // /branch (which reports `resume`): a spawn counted before has no count left to move.
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      tallyGen++
       firstStepOf.clear()
+    }
+    if (e.reason === 'clear') {
       await Promise.all([
         update($, history, () => []),
         update($, tools, () => []),
@@ -384,15 +392,18 @@ export const register: Register = (on, options) => {
     const first = agentId !== undefined ? firstStepOf.get(agentId) : undefined
     if (agentId !== undefined) firstStepOf.delete(agentId)
     const res = yield* (async function* () {
+      let isAnswered = false
       try {
-        return yield* next(e)
-      } catch (err) {
-        // A request that never answered leaves the spawn pending for its next one.
-        if (agentId !== undefined && first !== undefined) firstStepOf.set(agentId, first)
-        throw err
+        const r = yield* next(e)
+        isAnswered = true
+        return r
+      } finally {
+        // A request that never answered (it threw, or its reader let go of the stream)
+        // leaves the spawn pending for its next one.
+        if (!isAnswered && agentId !== undefined && first !== undefined) firstStepOf.set(agentId, first)
       }
     })()
-    if (first !== undefined) {
+    if (first !== undefined && first.gen === tallyGen) {
       const runEffort = typeof e.effort === 'string' ? e.effort : ''
       const model = answeringModel(res.usage) ?? first.model
       await moveTally($, tallyKey(first.type, first.model, ''), tallyKey(first.type, model, runEffort)).catch(ignore)
@@ -455,7 +466,7 @@ export const register: Register = (on, options) => {
     if (ran.deny === undefined && ran.agentId !== undefined) {
       const model = ran.model ?? ''
       // Before any await: the agent's first request can follow the spawn closely.
-      firstStepOf.set(ran.agentId, { type: e.subagentType, model })
+      firstStepOf.set(ran.agentId, { type: e.subagentType, model, gen: tallyGen })
       const key = tallyKey(e.subagentType, model, '')
       await update($, agentTally, c => ({ ...c, [key]: (c[key] ?? 0) + 1 })).catch(ignore)
       await refreshSnap($).catch(ignore)

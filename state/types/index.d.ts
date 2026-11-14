@@ -48,7 +48,7 @@ declare module 'claude-code' {
       tools: HudTool[]
       /** Completed main-loop tool calls per tool name over the whole conversation. */
       toolCounts: Record<string, number>
-      /** Subagents spawned over the conversation, keyed `<type>\t<resolved model id>\t<definition effort>`. */
+      /** Subagents spawned over the conversation, keyed `<type>\t<model id that answered its first request, else the resolved spawn model>\t<effort its first request carried; empty before it or when none>`. */
       agentTally: Record<string, number>
       /** Tokens the main loop's requests in the latest user turn sent uncached or wrote to the cache, plus generated: the ▲ figure. Subagents' requests are not counted; null before the first turn. */
       turnTokens: number | null
