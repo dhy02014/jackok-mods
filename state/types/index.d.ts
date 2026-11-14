@@ -37,8 +37,6 @@ declare module 'claude-code' {
       // these types reads an old value as absent.
       snap: Shaped<HudSnap | null>
       git: HudGit | null
-      /** The cwd `session.start` reported: git's fallback directory before a snap holds one. */
-      startCwd: string | null
       weekly: HudWeekly | null
       /** The main loop's effort as the last model request named it. */
       effort: string | null

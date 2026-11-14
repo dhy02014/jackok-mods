@@ -392,17 +392,30 @@ const TURN = { answer: '', durationMs: 1, isAborted: false, turnId: 't', reason:
 test('a subagent’s turn end runs git in the main session’s cwd, with a timeout', async ($, on) => {
   const runs: string[][] = []
   const inits: StubOptions['inits'] = []
-  const clock = stub(on, { runs, inits })
+  const o: StubOptions = { runs, inits }
+  const clock = stub(on, o)
   await $.session.start(START)
   await clock.settle()
   const before = runs.length
+  // What `$.session.cwd()` answers inside the subagent's hook, and on its timer.
+  o.cwd = '/home/u/proj/.claude/worktrees/agent-1'
   await $.turn.complete({ ...TURN, agentId: 'sub-1' })
   await clock.advance(1)
   await clock.settle()
   expect(runs.slice(before)).toEqual([['git', '--no-optional-locks', 'status', '--porcelain=v2', '--branch']])
   expect(inits.slice(before)).toEqual([{ cwd: '/home/u/proj', timeoutMs: 10_000 }])
-  // Every git run names its directory.
-  expect(inits.every(i => i?.cwd === '/home/u/proj')).toBe(true)
+})
+
+test('after a reset of every state value, with no session.start, the band pulls git in the session’s cwd', async ($, on) => {
+  // Each test starts with every `$.state` value at its default, as /clear, /resume and /branch leave them.
+  const inits: StubOptions['inits'] = []
+  const clock = stub(on, { inits })
+  await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
+  await clock.advance(10)
+  await clock.settle()
+  const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: 'main* ↑2' })).toBeDefined()
+  expect(inits).toEqual([{ cwd: '/home/u/proj', timeoutMs: 10_000 }])
 })
 
 test('a turn end returns without waiting on git, and still records its context point', async ($, on) => {
@@ -421,15 +434,28 @@ test('a turn end returns without waiting on git, and still records its context p
   await clock.advance(1)
   await clock.settle()
   expect(inits.length).toBe(before + 1)
+  // A run that never settles releases the scheduler after the git timeout and a margin,
+  // and the turn end queued behind it runs then.
+  o.isGitHanging = false
+  await clock.advance(14_999)
+  await clock.settle()
+  expect(inits.length).toBe(before + 1)
+  await clock.advance(1)
+  await clock.advance(1)
+  await clock.settle()
+  expect(inits.length).toBe(before + 2)
+  // Mounted last: the band's own first draw pulls git too.
   const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
   expect(await ui.find({ type: 'Text', text: ' (84.00k)' })).toBeDefined()
 })
 
 test('per-model limits are cached per CLAUDE_CONFIG_DIR, and a logout drops its own', { options: { per_model_limits: true } }, async ($, on) => {
   const fetches: string[] = []
-  const store = new Map<string, unknown>()
+  // The legacy unkeyed entry, shared by every login, goes at start.
+  const store = new Map<string, unknown>([['weekly', { at: 0, data: { models: [] } }]])
   const env: Record<string, string> = { HOME: '/home/u', CLAUDE_CONFIG_DIR: '/home/u/.claude-work' }
-  const clock = stub(on, { authorized: true, fetches, store, env })
+  const usageBody = JSON.stringify({ limits: [{ kind: 'weekly_scoped', group: 'weekly', percent: 3, scope: { model: { display_name: 'Fable' } } }] })
+  const clock = stub(on, { authorized: true, fetches, store, env, usageBody })
   on('session.end', () => ({ sessionId: 'sid-1' }))
   await $.session.start(START)
   await clock.settle()
@@ -441,12 +467,12 @@ test('per-model limits are cached per CLAUDE_CONFIG_DIR, and a logout drops its 
   await $.session.start(START)
   await clock.settle()
   expect(fetches).toHaveLength(2)
-  // Unset is its own key, not either of the others.
+  // Unset is `<home>/.claude`, its own key.
   delete env.CLAUDE_CONFIG_DIR
   await $.session.start(START)
   await clock.settle()
   expect(fetches).toHaveLength(3)
-  expect([...store.keys()].sort()).toEqual(['weekly:', 'weekly:/home/u/.claude-personal', 'weekly:/home/u/.claude-work'])
+  expect([...store.keys()].sort()).toEqual(['weekly:/home/u/.claude', 'weekly:/home/u/.claude-personal', 'weekly:/home/u/.claude-work'])
   // The same dir within the TTL reads its cache.
   env.CLAUDE_CONFIG_DIR = '/home/u/.claude-work'
   await $.session.start(START)
@@ -454,8 +480,18 @@ test('per-model limits are cached per CLAUDE_CONFIG_DIR, and a logout drops its 
   expect(fetches).toHaveLength(3)
 
   env.CLAUDE_CONFIG_DIR = '/home/u/.claude-personal'
+  expect(await (await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })).find({ type: 'Text', text: 'Fable ' })).toBeDefined()
   await $.session.end({ reason: 'logout', sessionId: 'sid-1', resume: {} as never })
-  expect([...store.keys()].sort()).toEqual(['weekly:', 'weekly:/home/u/.claude-work'])
+  expect([...store.keys()].sort()).toEqual(['weekly:/home/u/.claude', 'weekly:/home/u/.claude-work'])
+  // The band drops the logged-out account's rows too.
+  expect(await (await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })).find({ type: 'Text', text: 'Fable ' })).toBeUndefined()
+
+  // A Windows home with no CLAUDE_CONFIG_DIR keys by `<home>/.claude`, its drive letter folded.
+  for (const k of Object.keys(env)) delete env[k]
+  env.USERPROFILE = 'C:\\Users\\u'
+  await $.session.start(START)
+  await clock.settle()
+  expect(store.has('weekly:c:/Users/u/.claude')).toBe(true)
 })
 
 test('a Korean language setting still yields English band labels and toasts', async ($, on) => {
@@ -628,7 +664,7 @@ const topLine = async (ui: { drawn: () => Promise<unknown> }) => {
   const [parts, id] = (line?.children ?? []) as Node[]
   const pieces = (parts?.children ?? []) as Node[]
   const fixed = pieces.filter(p => p.props?.flexShrink === 0)
-  const shrinking = pieces.filter(p => p.props?.flexShrink === 1)
+  const shrinking = pieces.filter(p => typeof p.props?.flexShrink === 'number' && p.props.flexShrink > 0)
   return { fixedCells: 2 + fixed.reduce((n, p) => n + cells(textOf(p)), 0) + cells(textOf(id)), shrinking, id }
 }
 
@@ -659,6 +695,8 @@ for (const model of ['claude-opus-5-5', ARN]) {
       return isNode(text) ? text.props?.wrap : undefined
     })
     expect(wraps).toEqual(['truncate-end', 'truncate-start', 'truncate-end'])
+    // The least informative gives way first: branch, then cwd, then the model.
+    expect(shrinking.map(p => p.props?.flexShrink)).toEqual([1, 2, 3])
   })
 }
 

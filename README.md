@@ -41,11 +41,15 @@ Options are set in the plugin's options in `/plugin`.
 
 A band above the prompt showing the session's state; `/state` hides or shows it.
 
+The git part follows the main session's directory, even while a subagent works in a worktree. `git status` has a 10-second timeout and never holds up a turn end or a tool call.
+
+Below 100 band columns the session id shows only its first 8 characters; pressing it still copies the full id. A long model id or branch name is cut off with `…` instead of wrapping the line.
+
 | Option | Default | Effect |
 | :-- | :-- | :-- |
 | `per_model_limits` | off | Also shows per-model weekly limits, read every few minutes from the `https://api.anthropic.com/api/oauth/usage` endpoint with your Claude Code login. claude.ai subscriptions only. |
 
-What it touches: with `per_model_limits` off, no network request is made and only the limits Claude Code reports are shown. With it on, the endpoint is undocumented and may change or stop working without notice. It makes no request when `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set. `state` writes no files.
+What it touches: with `per_model_limits` off, no network request is made and only the limits Claude Code reports are shown. With it on, the endpoint is undocumented and may change or stop working without notice. It makes no request when `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set. The cached per-model figures are kept separately for each `CLAUDE_CONFIG_DIR`, so two logins on one machine never share them; a logout deletes that config directory's cached figures. `state` writes no files.
 
 ## manage-pane
 

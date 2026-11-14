@@ -19,7 +19,6 @@ type Options = { per_model_limits?: boolean }
 // Bump a shape tag whenever that value's type changes.
 const snap = atom({ plugin: 'state', key: 'snap' } as const, null, { shape: 'v3' })
 const git = atom({ plugin: 'state', key: 'git' } as const, null)
-const startCwd = atom({ plugin: 'state', key: 'startCwd' } as const, null)
 const weekly = atom({ plugin: 'state', key: 'weekly' } as const, null)
 const effort = atom({ plugin: 'state', key: 'effort' } as const, null)
 const alerted = atom({ plugin: 'state', key: 'alerted' } as const, {})
@@ -62,13 +61,14 @@ const setIfChanged = async <T,>(value: T, current: T, write: () => Promise<unkno
 // both writers update the value in place rather than overwrite a stale read.
 // Each figure settles on its own: before the first request (or before the session
 // binds) one may be missing, and the band still draws from the rest instead of
-// staying empty until the first turn ends. Only a session id is required.
-const refreshSnap = async ($: EngineInterface) => {
+// staying empty until the first turn ends. Only a session id is required. `keepPlace`
+// keeps the saved model and cwd, for a hook that may run in a subagent's context.
+const refreshSnap = async ($: EngineInterface, keepPlace = false) => {
   const startedAt = await $.clock.now()
   const [usage, model, cwd, sessionId] = await Promise.all([
     $.session.usage().catch(() => undefined),
-    $.session.model().catch(() => undefined),
-    $.session.cwd().catch(() => undefined),
+    keepPlace ? undefined : $.session.model().catch(() => undefined),
+    keepPlace ? undefined : $.session.cwd().catch(() => undefined),
     $.session.id().catch(() => undefined),
   ])
   const cur = await read($, snap)
@@ -95,14 +95,20 @@ const refreshSnap = async ($: EngineInterface) => {
   })
 }
 
+// The cwd `session.start` reported. Run-scoped, not `$.state`: the engine resets every state
+// value on /clear, /resume and /branch, and no session.start follows them.
+let startCwd: string | undefined
+
 // The main session's cwd as main-thread pulls last saw it. Never `$.session.cwd()` here: inside
 // a subagent's hook that is the subagent's own (often a worktree).
 const mainCwd = async ($: EngineInterface) => {
-  const cwd = (await read($, snap).catch(() => null))?.cwd || (await read($, startCwd).catch(() => null))
+  const cwd = (await read($, snap).catch(() => null))?.cwd || startCwd
   return cwd ? slashed(cwd) : undefined
 }
 
 const GIT_TIMEOUT_MS = 10_000
+// A run that never settles releases the scheduler this long after it started.
+const GIT_WATCHDOG_MS = GIT_TIMEOUT_MS + 5_000
 
 // No git on the machine, or a cwd outside a repo: the git part is left out.
 const refreshGit = async ($: EngineInterface, cwd?: string) => {
@@ -130,6 +136,8 @@ const refreshGit = async ($: EngineInterface, cwd?: string) => {
 let gitPending = false
 let gitAgain = false
 let gitCwd: string | undefined
+// Each run's number: a run the watchdog gave up on settles later without touching the guard.
+let gitRun = 0
 
 const scheduleGit = ($: EngineInterface, cwd?: string) => {
   if (cwd) gitCwd = cwd
@@ -138,19 +146,24 @@ const scheduleGit = ($: EngineInterface, cwd?: string) => {
     return
   }
   gitPending = true
+  const release = (run: number) => {
+    if (run !== gitRun) return
+    gitRun++
+    gitPending = false
+    if (gitAgain) {
+      gitAgain = false
+      scheduleGit($)
+    }
+  }
   // On the clock, not in flight: the calling hook's `$` calls abort when its budget ends.
   $.clock.after(1, () => {
+    const run = ++gitRun
     const dir = gitCwd
     gitCwd = undefined
+    $.clock.after(GIT_WATCHDOG_MS, () => release(run))
     void refreshGit($, dir)
       .catch(ignore)
-      .finally(() => {
-        gitPending = false
-        if (gitAgain) {
-          gitAgain = false
-          scheduleGit($)
-        }
-      })
+      .finally(() => release(run))
       .catch(ignore)
   })
 }
@@ -189,9 +202,12 @@ type WeeklyCache = { at: number; data: HudWeekly | null }
 let perModelLimits = false
 
 // `$.store` is shared by every session on the machine; each config dir is its own login.
+// The dir is CLAUDE_CONFIG_DIR, else `<home>/.claude`; a drive letter folds to lower case.
 const weeklyKey = async ($: EngineInterface) => {
-  const dir = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
-  return `weekly:${dir ? slashed(dir) : ''}`
+  const set = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
+  const home = set ? undefined : await homeOf($)
+  const dir = set ? slashed(set) : home !== undefined ? `${home}/.claude` : ''
+  return `weekly:${dir.replace(/^[A-Z](?=:)/, d => d.toLowerCase())}`
 }
 
 const refreshWeekly = async ($: EngineInterface) => {
@@ -293,12 +309,16 @@ const heal = ($: EngineInterface, sessionId: string | undefined) => {
   const key = sessionId ?? null
   if (isHealing || key === healedFor) return
   isHealing = true
+  // The snap first: git runs in the cwd it names.
   $.clock.after(1, () =>
-    void Promise.allSettled([refreshSnap($), refreshGit($), refreshWeekly($)]).finally(async () => {
-      isHealing = false
-      // Keyed by what the pull found: a snap still missing is tried again on the next draw.
-      healedFor = (await read($, snap).catch(() => null))?.sessionId ?? undefined
-    }),
+    void refreshSnap($)
+      .catch(ignore)
+      .then(() => Promise.allSettled([refreshGit($), refreshWeekly($)]))
+      .finally(async () => {
+        isHealing = false
+        // Keyed by what the pull found: a snap still missing is tried again on the next draw.
+        healedFor = (await read($, snap).catch(() => null))?.sessionId ?? undefined
+      }),
   )
 }
 
@@ -336,7 +356,10 @@ export const register: Register = (on, options) => {
     gitPending = false
     gitAgain = false
     gitCwd = undefined
-    await update($, startCwd, () => (e.cwd ? e.cwd : null)).catch(ignore)
+    gitRun++
+    startCwd = e.cwd || undefined
+    // The cache was once one unkeyed entry for every login; drop it.
+    void $.store.delete('weekly').catch(ignore)
     await $.command.register({ name: 'state', description: t.commandDescription }).catch(ignore)
     $.clock.every(MINUTE_MS, () => void tick($).catch(ignore))
     await Promise.allSettled([refreshSnap($), refreshGit($)])
@@ -373,7 +396,10 @@ export const register: Register = (on, options) => {
       $.clock.after(1, () => void refreshSnap($).catch(ignore))
     }
     // The next login in this config dir may be another account: its cached figures go.
-    if (e.reason === 'logout') await $.store.delete(await weeklyKey($)).catch(ignore)
+    if (e.reason === 'logout') {
+      await $.store.delete(await weeklyKey($)).catch(ignore)
+      await update($, weekly, () => null).catch(ignore)
+    }
     return done
   })
 
@@ -501,7 +527,8 @@ export const register: Register = (on, options) => {
       firstStepOf.set(ran.agentId, { type: e.subagentType, model, gen: tallyGen })
       const key = tallyKey(e.subagentType, model, '')
       await update($, agentTally, c => ({ ...c, [key]: (c[key] ?? 0) + 1 })).catch(ignore)
-      await refreshSnap($).catch(ignore)
+      // A nested spawn may run in its parent subagent's context: keep the main model and cwd.
+      await refreshSnap($, true).catch(ignore)
     }
     return ran
   })
@@ -523,8 +550,15 @@ export const register: Register = (on, options) => {
     const ran = await next(e)
     await update($, tools, list => list.map(t => (t.id === row.id ? { ...t, isDone: true } : t)))
     await update($, toolCounts, c => ({ ...c, [row.name]: (c[row.name] ?? 0) + 1 }))
-    // Main thread only here, so this cwd is the session's, fresh after an EnterWorktree.
-    if (GIT_TOUCHING.has(String(e.tool))) scheduleGit($, await $.session.cwd().catch(() => undefined))
+    if (GIT_TOUCHING.has(String(e.tool))) {
+      // Main thread only here, so this cwd is the session's, fresh after an EnterWorktree.
+      const cwd = await $.session.cwd().catch(() => undefined)
+      // A worktree move goes into the snap too, so a later subagent turn end reads the new cwd.
+      if (row.name === 'EnterWorktree' || row.name === 'ExitWorktree') {
+        await update($, snap, cur => (cur !== null && cwd && cur.cwd !== cwd ? { ...cur, cwd } : cur)).catch(ignore)
+      }
+      scheduleGit($, cwd)
+    }
     return ran
   })
 

@@ -174,9 +174,9 @@ export const bandTree = ({ Box, Button, Text }: Draw, o: BandInput, below: JSX.E
   // The top line stays one row: the context part keeps its width, and the model, the cwd
   // and the branch give way. The cwd, at most two segments, truncates from the left and
   // copies the full path when pressed; the model (an unparsed id can be a long ARN) and
-  // the branch truncate at the end.
+  // the branch truncate at the end. The least informative goes first: branch, then cwd, then model.
   const CWD = (
-    <Box flexShrink={1}>
+    <Box flexShrink={2}>
       <Button key="copy-cwd" plain onPress={p => o.onCopyCwd(p.surface)}>
         <Text color="yellow" wrap="truncate-start">{cwdLabel(s.cwd, o.home)}</Text>
       </Button>
@@ -192,7 +192,7 @@ export const bandTree = ({ Box, Button, Text }: Draw, o: BandInput, below: JSX.E
     </Box>
   )
   const BRANCH = g !== null && (
-    <Box flexShrink={1}>
+    <Box flexShrink={3}>
       <Text color="magenta" wrap="truncate-end">
         {g.branch}
         {g.changed > 0 ? '*' : ''}
