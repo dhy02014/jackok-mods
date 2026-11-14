@@ -177,8 +177,10 @@ export const agentStub = (
     files?: Record<string, string>
     language?: string
     agentId?: (n: number) => string
-    /** The model a request's result says answered it; the one asked when unset. */
-    answeredBy?: string
+    /** The model a request's result says answered it; the one asked when unset; null for a result with no usage. */
+    answeredBy?: string | null
+    /** A request streams one chunk before its result, so a test can look at the row mid-request. */
+    isStreamed?: boolean
   } = {},
 ) => {
   const clock = mock.clock(on, { now: 0 })
@@ -189,7 +191,11 @@ export const agentStub = (
   let n = 0
   on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: (n += 1, o.agentId?.(n) ?? `a${n}`) }))
   on('turn.step', async function* ($, e) {
-    const usage = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: o.answeredBy ?? e.model }
+    if (o.isStreamed === true) yield { kind: 'text', index: 0, text: 'ok' }
+    const usage =
+      o.answeredBy === null
+        ? null
+        : { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: o.answeredBy ?? e.model }
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
   })
   on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
@@ -241,9 +247,9 @@ export const agentCall = ($: Fire, description: string, agentId?: string) =>
 
 export const spawn = ($: Fire, description: string) => $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description } as never)
 
-// One model request of a subagent (`agentId`) or of the main loop (undefined), read to its end.
-export const step = async ($: Fire, agentId: string | undefined, effort?: string, model = 'claude-sonnet-5-5') => {
-  const stream = $.turn.step({
+// One model request of a subagent (`agentId`) or of the main loop (undefined), not yet read.
+export const stepOpen = ($: Fire, agentId: string | undefined, effort?: string, model = 'claude-sonnet-5-5') =>
+  $.turn.step({
     turnId: 't',
     index: 0,
     model,
@@ -251,6 +257,10 @@ export const step = async ($: Fire, agentId: string | undefined, effort?: string
     ...(effort !== undefined ? { effort } : {}),
     ...(agentId !== undefined ? { agentId } : {}),
   } as never)
+
+// The same, read to its end.
+export const step = async ($: Fire, agentId: string | undefined, effort?: string, model = 'claude-sonnet-5-5') => {
+  const stream = stepOpen($, agentId, effort, model)
   let s = await stream.next()
   while (s.done !== true) s = await stream.next()
   return s.value

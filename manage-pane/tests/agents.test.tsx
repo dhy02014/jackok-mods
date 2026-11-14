@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 import { cells } from '../hooks/strings'
-import { START, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, agentTool, agentCall, spawn, listOf, prompt, step } from './helpers'
+import { START, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, agentTool, agentCall, spawn, listOf, prompt, step, stepOpen } from './helpers'
 
 test('a running agent shows under its task: only the call it is on, no description row', async ($, on) => {
   const clock = agentStub(on)
@@ -341,6 +341,50 @@ test('a plugin agent’s effort is its requests’ too, and the model is the one
   await step($, 'a1', 'xhigh')
   const ui = await mountRows($, 40)
   expect(await ui.find({ type: 'Text', text: '◐ my-plugin:reviewer Opus 5.5:xhigh  ~/proj' })).toBeDefined()
+})
+
+test('mid-request the row already shows the request’s effort, on the model it was drawn with', async ($, on) => {
+  agentStub(on, {}, { isStreamed: true, answeredBy: 'claude-opus-5-5' })
+  await $.session.start(START)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Work' } as never)
+  const stream = stepOpen($, 'a1', 'high', 'claude-haiku-5')
+  expect((await stream.next()).done).toBe(false)
+  let ui = await mountRows($, 40)
+  // The requested model is not the one that answers: only the result names that.
+  expect(await ui.find({ type: 'Text', text: '◐ explorer Sonnet 5.5:high  ~/proj' })).toBeDefined()
+  await ui.unmount()
+  while ((await stream.next()).done !== true) {
+    // drain
+  }
+  ui = await mountRows($, 40)
+  expect(await ui.find({ type: 'Text', text: '◐ explorer Opus 5.5:high  ~/proj' })).toBeDefined()
+})
+
+test('a result with no usage keeps the spawn’s model and still shows the effort', async ($, on) => {
+  agentStub(on, {}, { answeredBy: null })
+  await $.session.start(START)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Work' } as never)
+  await step($, 'a1', 'medium', 'claude-opus-5-5')
+  const ui = await mountRows($, 40)
+  expect(await ui.find({ type: 'Text', text: '◐ explorer Sonnet 5.5:medium  ~/proj' })).toBeDefined()
+})
+
+test('a placeholder answering model such as <synthetic> is not drawn', async ($, on) => {
+  agentStub(on, {}, { answeredBy: '<synthetic>' })
+  await $.session.start(START)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Work' } as never)
+  await step($, 'a1', 'medium')
+  const ui = await mountRows($, 40)
+  expect(await ui.find({ type: 'Text', text: '◐ explorer Sonnet 5.5:medium  ~/proj' })).toBeDefined()
+})
+
+test('a request from an agent never spawned here adds no row', async ($, on) => {
+  agentStub(on)
+  await $.session.start(START)
+  await step($, 'zz', 'high')
+  const ui = await mountRows($, 40)
+  expect(await ui.find({ type: 'Text', text: /^◐ / })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeUndefined()
 })
 
 test('a resumed agent runs again under its new task; the completed task keeps its frozen run', async ($, on) => {

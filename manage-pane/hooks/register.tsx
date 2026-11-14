@@ -344,10 +344,13 @@ const agentDef = async ($: EngineInterface, type: string): Promise<AgentDef> => 
 
 // A tracked agent's model and effort as its latest request had them; written only on a change,
 // since every request of every subagent passes here.
-const noteRun = async ($: EngineInterface, id: string, run: { model: string; effort: string | undefined }) => {
+// A model left out keeps the one drawn.
+const noteRun = async ($: EngineInterface, id: string, run: { model?: string; effort: string | undefined }) => {
   const a = (await read($, agents))[id]
-  if (a === undefined || (a.model === run.model && a.effort === run.effort)) return
-  await update($, agents, all => touch(all, id, x => ({ ...x, model: run.model, effort: run.effort })))
+  if (a === undefined) return
+  const model = run.model ?? a.model
+  if (a.model === model && a.effort === run.effort) return
+  await update($, agents, all => touch(all, id, x => ({ ...x, model, effort: run.effort })))
 }
 
 // Agent calls asking `isolation: 'worktree'`, by tool_use_id, which `agent.spawn` carries
@@ -472,18 +475,22 @@ export const register: Register = (on, options) => {
     return ran
   })
 
-  // A subagent's effort and model as its requests carry them: the engine's effective level
-  // (env override, per-call `effort`, definition, session, model support and caps applied),
-  // absent on a model without effort. A definition file would miss the per-call value,
-  // plugin and `--agents` definitions, and the caps. The answering model is the result's.
+  // A subagent's effort as its request carries it at this hook's place in the chain: the
+  // engine's effective level (env override, per-call `effort`, definition, session, model
+  // support and caps applied), absent on a model without effort; a turn.step hook below this
+  // one may still change it. A definition file would miss the per-call value, plugin and
+  // `--agents` definitions, and the caps. The model is the one the result says answered.
   on('turn.step', async function* ($, e, next) {
     const id = e.agentId
     if (id === undefined) return yield* next(e)
     const effort = typeof e.effort === 'string' ? e.effort : undefined
-    await noteRun($, id, { model: e.model, effort }).catch(ignore)
+    await noteRun($, id, { effort }).catch(ignore)
     const res = yield* next(e)
     const answered = (res.usage as { model?: unknown } | null | undefined)?.model
-    if (typeof answered === 'string' && answered !== '') await noteRun($, id, { model: answered, effort }).catch(ignore)
+    // `<synthetic>` and the like name a placeholder message, not a model.
+    if (typeof answered === 'string' && answered !== '' && !answered.startsWith('<')) {
+      await noteRun($, id, { model: answered, effort }).catch(ignore)
+    }
     return res
   })
 
