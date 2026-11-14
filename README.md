@@ -59,7 +59,7 @@ Tasks persist in the plugin's own store, which keeps the newest 50 sessions. `/r
 
 These behaviours are always on:
 
-- An Agent whose description starts with `#N ` takes task N as its owner and sets it in progress. The built-in Agent tool's description is left untouched; the model learns the claim from the description of `task_create`: "An Agent description like `#3 Trace the auth flow` claims task 3." The claim is skipped when another running agent already owns task N; the agent is then drawn under task N without claiming it.
+- An Agent whose description starts with `#N ` takes task N as its owner and sets it in progress. The built-in Agent tool's description is left untouched; the model learns the claim from the description of `task_create`: "An Agent description starting `#3 ` claims task 3." The claim is skipped when another running agent already owns task N; the agent is then drawn under task N without claiming it.
 - An Agent call is never refused for its description. One without a `#N ` mark, or naming no open task, runs as typed and claims nothing.
 - Agents that claim no task are drawn in an "Other" section below the task list: running ones in full, finished ones as one dim line each, the newest 3. The section is absent when every agent is claimed. A `/resume`, `/branch` or `/clear` empties it; agents from the previous session are not carried over.
 - While any task is open, a subagent's hand-back gets a model-only note naming the open tasks it owns, followed by the open list; other background notifications get the open list alone.
@@ -69,19 +69,10 @@ The description of `task_create` tells the model to use these tools instead of t
 | Option | Default | Effect |
 | :-- | :-- | :-- |
 | `open_on_start` | on | Opens the pane when an interactive session starts. Off: the pane opens with the first task of a list, or with `/pane`. |
-| `mirror_task_files` | `false` | Also write each task to the CLI's task-list directory, for external readers. |
-
-With `mirror_task_files` on, each task is also written to `<id>.json` in `$CLAUDE_CONFIG_DIR/tasks/<CLAUDE_CODE_TASK_LIST_ID or session id>/` in Claude Code's task-file format. The directory is `~/.claude/tasks/...` when `CLAUDE_CONFIG_DIR` is unset or empty. New ids also skip any `<n>.json` or `.highwatermark` already in that directory. Turning it on partway through a list mirrors only tasks created from then on; earlier tasks' files in that directory are never written or removed. Turning it off stops mirroring without removing files already written there. With it off, the directory is neither read nor written.
-
-To set `mirror_task_files`, run `/plugin configure manage-pane@jackok-mods`, use its row in the `/config` panel, or add this to user settings (user or managed settings only; project and local entries are ignored):
-
-```json
-{ "pluginConfigs": { "manage-pane@jackok-mods": { "options": { "mirror_task_files": true } } } }
-```
 
 To turn manage-pane off, disable the plugin.
 
-What it touches: the plugin's own task store, and the CLI tasks directory only with `mirror_task_files` on. It reads user agent definitions (for `isolation: worktree`) from `$CLAUDE_CONFIG_DIR/agents` when set, else `~/.claude/agents`, after the project's `<cwd>/.claude/agents`.
+What it touches: the plugin's own task store; it never reads or writes the CLI tasks directory and runs no processes. It reads user agent definitions (for `isolation: worktree`) from `$CLAUDE_CONFIG_DIR/agents` when set, else `~/.claude/agents`, after the project's `<cwd>/.claude/agents`.
 
 Models that still ship the built-in task tools (Opus 4.7, Sonnet 4.6, Haiku 4.5 and earlier, per the [tools reference](https://code.claude.com/docs/en/tools-reference)) would see two task tool sets. To avoid that, leave the built-in task tools out of the list you pass to `--tools`.
 
