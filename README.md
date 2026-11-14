@@ -71,7 +71,7 @@ The description of `task_create` tells the model to use these tools instead of t
 | `open_on_start` | on | Opens the pane when an interactive session starts. Off: the pane opens with the first task of a list, or with `/pane`. |
 | `mirror_task_files` | `false` | Also write each task to the CLI's task-list directory, for external readers. |
 
-With `mirror_task_files` on, each task is also written to `<id>.json` in `$CLAUDE_CONFIG_DIR/tasks/<CLAUDE_CODE_TASK_LIST_ID or session id>/` in Claude Code's task-file format. The directory is `~/.claude/tasks/...` when `CLAUDE_CONFIG_DIR` is unset or empty. New ids also skip any `<n>.json` or `.highwatermark` already in that directory. With it off, the directory is neither read nor written.
+With `mirror_task_files` on, each task is also written to `<id>.json` in `$CLAUDE_CONFIG_DIR/tasks/<CLAUDE_CODE_TASK_LIST_ID or session id>/` in Claude Code's task-file format. The directory is `~/.claude/tasks/...` when `CLAUDE_CONFIG_DIR` is unset or empty. New ids also skip any `<n>.json` or `.highwatermark` already in that directory. Turning it on partway through a list mirrors only tasks created from then on; earlier tasks' files in that directory are never written or removed. Turning it off stops mirroring without removing files already written there. With it off, the directory is neither read nor written.
 
 To set `mirror_task_files`, run `/plugin configure manage-pane@jackok-mods`, use its row in the `/config` panel, or add this to user settings (user or managed settings only; project and local entries are ignored):
 
