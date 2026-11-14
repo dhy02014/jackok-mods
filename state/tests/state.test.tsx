@@ -1,6 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { cells } from './cells'
+
 const BAND = {
   component: 'AbovePrompt',
   props: {
@@ -12,6 +14,23 @@ const BAND = {
     view: {},
   },
 } as const
+
+// A drawn node, as `ui.drawn()` hands it back.
+type Node = { type?: string; props?: Record<string, unknown>; children?: unknown[]; part?: { plugin?: string } }
+const isNode = (c: unknown): c is Node => typeof c === 'object' && c !== null && !Array.isArray(c)
+
+// The AbovePrompt root lists one part per plugin; this mod's carries its name.
+const ownPart = (root: unknown) => (isNode(root) ? root.children?.find(c => isNode(c) && c.part?.plugin === 'state') : undefined) as Node | undefined
+
+// Every string a node draws, a button's label included, in order.
+const textOf = (n: unknown): string =>
+  typeof n === 'string' || typeof n === 'number'
+    ? String(n)
+    : Array.isArray(n)
+      ? n.map(textOf).join('')
+      : isNode(n)
+        ? (n.children?.length ? n.children.map(textOf).join('') : typeof n.props?.label === 'string' ? n.props.label : '')
+        : ''
 
 const START = { cwd: '/home/u/proj', surface: 'terminal', isInteractive: true } as const
 
@@ -43,6 +62,14 @@ type StubOptions = {
   fetches?: string[]
   /** Claude Code's `language` setting; unset by default. */
   language?: string
+  /** The `init` of each process run, in order. */
+  inits?: ({ cwd?: string; timeoutMs?: number } | undefined)[]
+  /** Every git run from now on never settles. */
+  isGitHanging?: boolean
+  /** `$.store` entries, shared by every session the test runs; a fresh store by default. */
+  store?: Map<string, unknown>
+  /** `$.session.model()`; `claude-opus-5-5` by default. */
+  model?: string
 }
 
 // A Windows host hands `fs.*` hooks native paths (`C:\home\u\...`); key the stubs by the POSIX form.
@@ -50,8 +77,15 @@ const norm = (path: string) => path.replace(/\\/g, '/').replace(/^[A-Za-z]:(?=\/
 
 const stub = (on: On, o: StubOptions = {}) => {
   const clock = mock.clock(on, { now: 0 })
-  mock.env(on, o.env ?? { HOME: '/home/u' })
-  mock.store(on)
+  // Read live, so a test can switch the environment between sessions.
+  on('env.get', ($, e) => ({ value: (o.env ?? { HOME: '/home/u' })[e.name] }))
+  if (o.store === undefined) mock.store(on)
+  else {
+    const store = o.store
+    on('store.get', ($, e) => ({ value: store.get(e.key) }))
+    on('store.set', ($, e) => (store.set(e.key, e.value), { value: undefined }))
+    on('store.delete', ($, e) => (store.delete(e.key), { value: undefined }))
+  }
   on('session.usage', () => {
     if (o.isUsageFailing === true) throw new Error('not bound')
     return {
@@ -63,7 +97,7 @@ const stub = (on: On, o: StubOptions = {}) => {
       },
     }
   })
-  on('session.model', () => ({ value: 'claude-opus-5-5' }))
+  on('session.model', () => ({ value: o.model ?? 'claude-opus-5-5' }))
   on('session.cwd', () => ({ value: o.cwd ?? '/home/u/proj' }))
   on('session.id', () => ({ value: o.sessionId ?? 'sid-1' }))
   on('session.authorize', () => ({ value: o.authorized === true ? { handle: 'h', kind: 'bearer' as const } : null }))
@@ -80,7 +114,9 @@ const stub = (on: On, o: StubOptions = {}) => {
   })
   on('command.register', () => ({ value: { name: 'state' } }))
   on('process.run', ($, e) => {
+    o.inits?.push(e.init)
     if (o.isGitMissing === true && e.argv[0] === 'git') return { deny: 'spawn git ENOENT' }
+    if (o.isGitHanging === true && e.argv[0] === 'git') return new Promise<never>(() => {})
     return {
       value: {
         exitCode: (o.runs?.push([...e.argv]), 0),
@@ -158,9 +194,10 @@ test('band shows context, model, cwd, git, limits and cost, and leaves tasks to 
     expect(await ui.find({ type: 'Text', text: ' (2h 10m)' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '×1' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Write the HUD/ })).toBeUndefined()
-    // The rule stays flush left; every row under it sits indented.
-    const band = await ui.drawn()
-    expect(band.type === 'Box' ? band.children.slice(0, 2) : undefined).toMatchObject([
+    // The rule stays flush left; every row under it sits indented. The drawn root lists
+    // each plugin's part; this mod's is the one marked with its name.
+    const own = ownPart(await ui.drawn())
+    expect(own?.children?.slice(0, 2)).toMatchObject([
       { type: 'Box' },
       { type: 'Box', props: { paddingLeft: 2 } },
     ])
@@ -350,6 +387,77 @@ test('git-touching tool calls return without waiting on git, and a burst runs it
   expect(after).toEqual([['git', '--no-optional-locks', 'status', '--porcelain=v2', '--branch']])
 })
 
+const TURN = { answer: '', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' } as const
+
+test('a subagent’s turn end runs git in the main session’s cwd, with a timeout', async ($, on) => {
+  const runs: string[][] = []
+  const inits: StubOptions['inits'] = []
+  const clock = stub(on, { runs, inits })
+  await $.session.start(START)
+  await clock.settle()
+  const before = runs.length
+  await $.turn.complete({ ...TURN, agentId: 'sub-1' })
+  await clock.advance(1)
+  await clock.settle()
+  expect(runs.slice(before)).toEqual([['git', '--no-optional-locks', 'status', '--porcelain=v2', '--branch']])
+  expect(inits.slice(before)).toEqual([{ cwd: '/home/u/proj', timeoutMs: 10_000 }])
+  // Every git run names its directory.
+  expect(inits.every(i => i?.cwd === '/home/u/proj')).toBe(true)
+})
+
+test('a turn end returns without waiting on git, and still records its context point', async ($, on) => {
+  const inits: StubOptions['inits'] = []
+  const o: StubOptions = { inits }
+  const clock = stub(on, o)
+  await $.session.start(START)
+  await clock.settle()
+  o.isGitHanging = true
+  const before = inits.length
+  // A git run awaited here would hold these past the test's timeout.
+  await $.turn.complete(TURN)
+  await $.turn.complete({ ...TURN, agentId: 'sub-1' })
+  expect(inits.length).toBe(before)
+  // The two share one scheduled run, which starts on the clock and hangs there, holding no hook.
+  await clock.advance(1)
+  await clock.settle()
+  expect(inits.length).toBe(before + 1)
+  const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
+  expect(await ui.find({ type: 'Text', text: ' (84.00k)' })).toBeDefined()
+})
+
+test('per-model limits are cached per CLAUDE_CONFIG_DIR, and a logout drops its own', { options: { per_model_limits: true } }, async ($, on) => {
+  const fetches: string[] = []
+  const store = new Map<string, unknown>()
+  const env: Record<string, string> = { HOME: '/home/u', CLAUDE_CONFIG_DIR: '/home/u/.claude-work' }
+  const clock = stub(on, { authorized: true, fetches, store, env })
+  on('session.end', () => ({ sessionId: 'sid-1' }))
+  await $.session.start(START)
+  await clock.settle()
+  expect(fetches).toHaveLength(1)
+  expect([...store.keys()]).toEqual(['weekly:/home/u/.claude-work'])
+
+  // Another account's session within the TTL fetches its own figures instead of reading these.
+  env.CLAUDE_CONFIG_DIR = '/home/u/.claude-personal'
+  await $.session.start(START)
+  await clock.settle()
+  expect(fetches).toHaveLength(2)
+  // Unset is its own key, not either of the others.
+  delete env.CLAUDE_CONFIG_DIR
+  await $.session.start(START)
+  await clock.settle()
+  expect(fetches).toHaveLength(3)
+  expect([...store.keys()].sort()).toEqual(['weekly:', 'weekly:/home/u/.claude-personal', 'weekly:/home/u/.claude-work'])
+  // The same dir within the TTL reads its cache.
+  env.CLAUDE_CONFIG_DIR = '/home/u/.claude-work'
+  await $.session.start(START)
+  await clock.settle()
+  expect(fetches).toHaveLength(3)
+
+  env.CLAUDE_CONFIG_DIR = '/home/u/.claude-personal'
+  await $.session.end({ reason: 'logout', sessionId: 'sid-1', resume: {} as never })
+  expect([...store.keys()].sort()).toEqual(['weekly:', 'weekly:/home/u/.claude-work'])
+})
+
 test('a Korean language setting still yields English band labels and toasts', async ($, on) => {
   const toasts: string[] = []
   stub(on, { language: 'ko' })
@@ -506,6 +614,59 @@ test('pressing the cwd copies its full path, not the shortened label', async ($,
   const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
   await ui.press({ key: 'copy-cwd' })
   expect(copied).toEqual([START.cwd])
+})
+
+const NARROW = { ...BAND, props: { ...BAND.props, bodyColumns: 80 } } as const
+const SID = '1b2c3d4e-5f60-4a7b-8c9d-0e1f2a3b4c5d'
+const ARN = 'arn:aws:bedrock:us-east-2:123456789012:application-inference-profile/opus-prod'
+
+// The test kit lays nothing out, so shrinking is checked by its parts: what cannot give way
+// (the indent, every flexShrink-0 part and the id) fits the row, and what can truncates.
+const topLine = async (ui: { drawn: () => Promise<unknown> }) => {
+  const rows = ownPart(await ui.drawn())?.children?.[1]
+  const line = (isNode(rows) ? rows.children?.[0] : undefined) as Node | undefined
+  const [parts, id] = (line?.children ?? []) as Node[]
+  const pieces = (parts?.children ?? []) as Node[]
+  const fixed = pieces.filter(p => p.props?.flexShrink === 0)
+  const shrinking = pieces.filter(p => p.props?.flexShrink === 1)
+  return { fixedCells: 2 + fixed.reduce((n, p) => n + cells(textOf(p)), 0) + cells(textOf(id)), shrinking, id }
+}
+
+for (const model of ['claude-opus-5-5', ARN]) {
+  test(`at 80 columns the top line shows an 8-character id and fits, model ${model === ARN ? 'an ARN' : 'known'}`, async ($, on) => {
+    stub(on, { model, sessionId: SID })
+    const copied: string[] = []
+    on('ui.copy', async ($, e) => {
+      copied.push(e.text)
+      return { value: { isCopied: true as const } }
+    })
+    on('ui.toast', () => ({ value: undefined }))
+    await $.session.start(START)
+    const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...NARROW })
+    expect(await ui.find({ type: 'Text', text: SID.slice(0, 8) })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: SID })).toBeUndefined()
+    await ui.press({ key: 'copy-id' })
+    expect(copied).toEqual([SID])
+
+    const { fixedCells, shrinking } = await topLine(ui)
+    expect(fixedCells).toBeLessThanOrEqual(80)
+    // Model, cwd and branch, each one truncating Text in a shrinking Box.
+    // An id the band cannot parse shows whole, first letter raised (`Arn:aws:...`).
+    expect(shrinking.map(p => textOf(p))).toEqual([model === ARN ? `A${ARN.slice(1)}` : 'Opus 5.5', '~/proj', 'main* ↑2'])
+    const wraps = shrinking.map(p => {
+      const kid = p.children?.[0]
+      const text = isNode(kid) && kid.type === 'Button' ? kid.children?.[0] : kid
+      return isNode(text) ? text.props?.wrap : undefined
+    })
+    expect(wraps).toEqual(['truncate-end', 'truncate-start', 'truncate-end'])
+  })
+}
+
+test('at 100 columns and up the whole id shows', async ($, on) => {
+  stub(on, { sessionId: SID })
+  await $.session.start(START)
+  const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND, props: { ...BAND.props, bodyColumns: 100 } })
+  expect(await ui.find({ type: 'Text', text: SID })).toBeDefined()
 })
 
 test('a subagent’s tally effort is its first request’s, never its definition file’s', async ($, on) => {

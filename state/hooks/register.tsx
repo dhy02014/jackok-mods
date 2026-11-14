@@ -19,6 +19,7 @@ type Options = { per_model_limits?: boolean }
 // Bump a shape tag whenever that value's type changes.
 const snap = atom({ plugin: 'state', key: 'snap' } as const, null, { shape: 'v3' })
 const git = atom({ plugin: 'state', key: 'git' } as const, null)
+const startCwd = atom({ plugin: 'state', key: 'startCwd' } as const, null)
 const weekly = atom({ plugin: 'state', key: 'weekly' } as const, null)
 const effort = atom({ plugin: 'state', key: 'effort' } as const, null)
 const alerted = atom({ plugin: 'state', key: 'alerted' } as const, {})
@@ -94,11 +95,27 @@ const refreshSnap = async ($: EngineInterface) => {
   })
 }
 
+// The main session's cwd as main-thread pulls last saw it. Never `$.session.cwd()` here: inside
+// a subagent's hook that is the subagent's own (often a worktree).
+const mainCwd = async ($: EngineInterface) => {
+  const cwd = (await read($, snap).catch(() => null))?.cwd || (await read($, startCwd).catch(() => null))
+  return cwd ? slashed(cwd) : undefined
+}
+
+const GIT_TIMEOUT_MS = 10_000
+
 // No git on the machine, or a cwd outside a repo: the git part is left out.
-const refreshGit = async ($: EngineInterface) => {
+const refreshGit = async ($: EngineInterface, cwd?: string) => {
+  // An explicit cwd: a relative run resolves against the subagent whose event the hook handles.
+  const dir = cwd ? slashed(cwd) : await mainCwd($)
   // `--no-optional-locks`: status otherwise refreshes the index under index.lock, which can
   // fail a git command the session runs at the same moment.
-  const r = await $.process.run(['git', '--no-optional-locks', 'status', '--porcelain=v2', '--branch']).catch(() => undefined)
+  const r =
+    dir === undefined
+      ? undefined
+      : await $.process
+          .run(['git', '--no-optional-locks', 'status', '--porcelain=v2', '--branch'], { cwd: dir, timeoutMs: GIT_TIMEOUT_MS })
+          .catch(() => undefined)
   if (r === undefined || r.exitCode !== 0) {
     await update($, git, () => null)
     return
@@ -107,21 +124,25 @@ const refreshGit = async ($: EngineInterface) => {
   await setIfChanged(next, await read($, git), () => update($, git, () => next))
 }
 
-// A tool call schedules the refresh instead of awaiting it, so git never holds the call's
-// return. A burst shares one run; a call landing while it runs queues exactly one more,
-// so the last change is always read.
+// A tool call or turn end schedules the refresh instead of awaiting it, so git never holds
+// the hook's return. A burst shares one run; a call landing while it runs queues exactly one
+// more, so the last change is always read, in the latest cwd a caller named.
 let gitPending = false
 let gitAgain = false
+let gitCwd: string | undefined
 
-const scheduleGit = ($: EngineInterface) => {
+const scheduleGit = ($: EngineInterface, cwd?: string) => {
+  if (cwd) gitCwd = cwd
   if (gitPending) {
     gitAgain = true
     return
   }
   gitPending = true
   // On the clock, not in flight: the calling hook's `$` calls abort when its budget ends.
-  $.clock.after(1, () =>
-    void refreshGit($)
+  $.clock.after(1, () => {
+    const dir = gitCwd
+    gitCwd = undefined
+    void refreshGit($, dir)
       .catch(ignore)
       .finally(() => {
         gitPending = false
@@ -130,8 +151,8 @@ const scheduleGit = ($: EngineInterface) => {
           scheduleGit($)
         }
       })
-      .catch(ignore),
-  )
+      .catch(ignore)
+  })
 }
 
 // The credential stays with the engine: `authorize()` hands out an opaque
@@ -167,17 +188,24 @@ type WeeklyCache = { at: number; data: HudWeekly | null }
 // band shows only the limits the engine reports.
 let perModelLimits = false
 
+// `$.store` is shared by every session on the machine; each config dir is its own login.
+const weeklyKey = async ($: EngineInterface) => {
+  const dir = await $.env.get('CLAUDE_CONFIG_DIR').catch(() => undefined)
+  return `weekly:${dir ? slashed(dir) : ''}`
+}
+
 const refreshWeekly = async ($: EngineInterface) => {
   if (!perModelLimits) return
   const now = await $.clock.now()
-  const cached = (await $.store.get('weekly')) as WeeklyCache | undefined
+  const key = await weeklyKey($)
+  const cached = (await $.store.get(key)) as WeeklyCache | undefined
   const ttl = cached?.data?.error !== undefined ? WEEKLY_FAILURE_TTL_MS : WEEKLY_TTL_MS
   let next: HudWeekly | null
   if (cached !== undefined && now - cached.at < ttl) {
     next = cached.data
   } else {
     next = await fetchWeekly($)
-    await $.store.set('weekly', { at: now, data: next } satisfies WeeklyCache)
+    await $.store.set(key, { at: now, data: next } satisfies WeeklyCache)
   }
   // A failed fetch keeps the last good figures and only marks them stale.
   const prev = await read($, weekly)
@@ -307,6 +335,8 @@ export const register: Register = (on, options) => {
     // A timer from before a reload may never fire, and would hold the guard shut.
     gitPending = false
     gitAgain = false
+    gitCwd = undefined
+    await update($, startCwd, () => (e.cwd ? e.cwd : null)).catch(ignore)
     await $.command.register({ name: 'state', description: t.commandDescription }).catch(ignore)
     $.clock.every(MINUTE_MS, () => void tick($).catch(ignore))
     await Promise.allSettled([refreshSnap($), refreshGit($)])
@@ -342,6 +372,8 @@ export const register: Register = (on, options) => {
       // On the clock, not in flight: this hook's `$` calls abort when its budget ends.
       $.clock.after(1, () => void refreshSnap($).catch(ignore))
     }
+    // The next login in this config dir may be another account: its cached figures go.
+    if (e.reason === 'logout') await $.store.delete(await weeklyKey($)).catch(ignore)
     return done
   })
 
@@ -491,19 +523,23 @@ export const register: Register = (on, options) => {
     const ran = await next(e)
     await update($, tools, list => list.map(t => (t.id === row.id ? { ...t, isDone: true } : t)))
     await update($, toolCounts, c => ({ ...c, [row.name]: (c[row.name] ?? 0) + 1 }))
-    if (GIT_TOUCHING.has(String(e.tool))) scheduleGit($)
+    // Main thread only here, so this cwd is the session's, fresh after an EnterWorktree.
+    if (GIT_TOUCHING.has(String(e.tool))) scheduleGit($, await $.session.cwd().catch(() => undefined))
     return ran
   })
 
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
+    // Git is scheduled, never awaited here; a subagent's turn reads the main session's tree.
     if (e.agentId !== undefined) {
-      await refreshGit($).catch(ignore)
+      scheduleGit($, await mainCwd($).catch(() => undefined))
       return done
     }
-    await Promise.allSettled([refreshSnap($), refreshGit($)])
+    await refreshSnap($).catch(ignore)
+    const s = await read($, snap)
+    scheduleGit($, s?.cwd)
     // One point per main-loop turn; turns with no reading add none.
-    const tokens = (await read($, snap))?.ctxTokens
+    const tokens = s?.ctxTokens
     if (tokens !== undefined) {
       await update($, history, list => [...list, tokens].slice(-HISTORY_TURNS))
     }

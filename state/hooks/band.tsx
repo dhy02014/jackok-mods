@@ -13,6 +13,10 @@ export type Draw = Pick<Elements[RenderSurface], 'Box' | 'Text' | 'Button'>
 // Left indent of every row under the `── state ──` rule, in cells.
 const CONTENT_INDENT = 2
 
+// Below this many band columns the top line shows an 8-character id prefix.
+const NARROW_COLUMNS = 100
+const SHORT_ID = 8
+
 export const kTokens = (n: number) => (Math.abs(n) >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
 const level = (p: number) => (p >= 80 ? 'red' : p >= 50 ? 'yellow' : 'green')
@@ -167,9 +171,10 @@ export const bandTree = ({ Box, Button, Text }: Draw, o: BandInput, below: JSX.E
   ]
 
   const SEP = <Text dimColor> | </Text>
-  // The top line stays one row: every part keeps its width and only the cwd,
-  // truncated from the left, gives way. It shows at most two segments; pressing it
-  // copies the full path.
+  // The top line stays one row: the context part keeps its width, and the model, the cwd
+  // and the branch give way. The cwd, at most two segments, truncates from the left and
+  // copies the full path when pressed; the model (an unparsed id can be a long ARN) and
+  // the branch truncate at the end.
   const CWD = (
     <Box flexShrink={1}>
       <Button key="copy-cwd" plain onPress={p => o.onCopyCwd(p.surface)}>
@@ -177,11 +182,31 @@ export const bandTree = ({ Box, Button, Text }: Draw, o: BandInput, below: JSX.E
       </Button>
     </Box>
   )
+  // `Opus 5.5:medium`, spelled and colored as the agents line spells a subagent's run.
+  const MODEL = (
+    <Box flexShrink={1}>
+      <Text wrap="truncate-end">
+        <Text color="cyan">{displayModel(s.model)}</Text>
+        {eff !== null && <Text dimColor>:{eff}</Text>}
+      </Text>
+    </Box>
+  )
+  const BRANCH = g !== null && (
+    <Box flexShrink={1}>
+      <Text color="magenta" wrap="truncate-end">
+        {g.branch}
+        {g.changed > 0 ? '*' : ''}
+        {g.ahead > 0 ? ` ↑${g.ahead}` : ''}
+        {g.behind > 0 ? ` ↓${g.behind}` : ''}
+      </Text>
+    </Box>
+  )
+  const shrinking = new Set<unknown>([CWD, MODEL, BRANCH])
   const joinedFixed = (parts: unknown[]) =>
     parts
       .filter(p => p !== null && p !== false)
       .flatMap((p, i) => (i === 0 ? [p] : [SEP, p]))
-      .map(p => (p === CWD ? p : <Box flexShrink={0}>{p}</Box>))
+      .map(p => (shrinking.has(p) ? p : <Box flexShrink={0}>{p}</Box>))
   // `a | b | c` from whichever parts are present.
   const joined = (parts: unknown[]) => parts.filter(p => p !== null && p !== false).flatMap((p, i) => (i === 0 ? [p] : [SEP, p]))
 
@@ -264,7 +289,7 @@ export const bandTree = ({ Box, Button, Text }: Draw, o: BandInput, below: JSX.E
       {/* Rows sit indented under the rule. */}
       <Box flexDirection="column" paddingLeft={CONTENT_INDENT}>
       <Box justifyContent="space-between">
-        {/* On a narrow terminal the line gives way, never the id: half an id is useless. */}
+        {/* The id never shrinks; below NARROW_COLUMNS it is a fixed prefix and the press still copies it whole. */}
         <Box flexShrink={1}>
           {joinedFixed([
             <Text>
@@ -277,27 +302,15 @@ export const bandTree = ({ Box, Button, Text }: Draw, o: BandInput, below: JSX.E
                 <Text color="green"> ▼{kTokens(delta)}</Text>
               )}
             </Text>,
-            // `Opus 5.5:medium`, spelled and colored as the agents line spells a subagent's run.
-            <Text>
-              <Text color="cyan">{displayModel(s.model)}</Text>
-              {eff !== null && <Text dimColor>:{eff}</Text>}
-            </Text>,
-            // The one part that gives way: it truncates from the left, so the line never wraps.
+            MODEL,
             CWD,
-            g !== null && (
-              <Text color="magenta">
-                {g.branch}
-                {g.changed > 0 ? '*' : ''}
-                {g.ahead > 0 ? ` ↑${g.ahead}` : ''}
-                {g.behind > 0 ? ` ↓${g.behind}` : ''}
-              </Text>
-            ),
+            BRANCH,
           ])}
         </Box>
         {/* Pressing the id copies it; the button itself is the label. */}
         <Box flexShrink={0}>
           <Button key="copy-id" plain onPress={p => o.onCopyId(p.surface)}>
-            <Text color="cyan">{s.sessionId}</Text>
+            <Text color="cyan">{o.columns < NARROW_COLUMNS ? s.sessionId.slice(0, SHORT_ID) : s.sessionId}</Text>
           </Button>
         </Box>
       </Box>
