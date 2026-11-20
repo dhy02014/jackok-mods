@@ -31,7 +31,7 @@ import {
   EMPTY,
   handbackText,
   listText,
-  openText,
+  namesId,
   own,
   ownersIn,
   str,
@@ -63,11 +63,11 @@ const CREATE = 'mcp__manage-pane__task_create'
 const UPDATE = 'mcp__manage-pane__task_update'
 const LIST = 'mcp__manage-pane__task_list'
 const AGENT = 'Agent'
-// Code mode's tools: a REPL script calls other tools, each through tool.call under its own name.
+// The tool a subagent ends its run with in auto mode (not a fork); a background agent's report
+// then reaches the main loop as a peer prompt. Whether a foreground one's also does is unverified.
+const HANDBACK = 'SubagentHandback'
+// Code mode's script tool: no row of its own; the calls its script makes are.
 const REPL = 'REPL'
-const POLL = 'Poll'
-// The Poll statuses of work that has ended.
-const FINISHED = new Set(['completed', 'failed', 'killed', 'stopped'])
 
 const board = atom({ plugin: 'manage-pane', key: 'board' } as const, EMPTY, { shape: 'v2' })
 const blink = atom({ plugin: 'manage-pane', key: 'blink' } as const, false)
@@ -289,12 +289,10 @@ const taskBody = <T,>(next: Parameters<typeof isOutOfTime>[0], id: string | unde
 let scanning: Promise<void> = Promise.resolve()
 const scanInstructions = ($: EngineInterface) => (scanning = scanning.catch(ignore).then(() => scanOnce($)))
 
-// A main-loop call's scan, on the clock (off the call's path); calls that end before it runs
-// share it. None for a call inside a running REPL script; a script's own end always queues one,
-// so a background script still running does not hold back the scans of those that end.
+// A main-loop call's scan, on the clock (off the call's path); calls that end before it runs share it.
 let scanQueued = false
-const queueScan = ($: EngineInterface, isScriptEnd = false) => {
-  if (scanQueued || (scripts > 0 && !isScriptEnd)) return
+const queueScan = ($: EngineInterface) => {
+  if (scanQueued) return
   scanQueued = true
   $.clock.after(1, () => {
     scanQueued = false
@@ -322,47 +320,36 @@ const scanOnce = async ($: EngineInterface) => {
 
 const currentTasks = async ($: EngineInterface) => own(await read($, board), await sessionId($)).tasks
 
-// Main-loop REPL scripts running. Per-call lists read stale by a script's end, so the script's
-// own result also carries one current reminder. Per-call reminders are kept as well, because
-// whether a REPL result's `context` reaches the model is unverified (check live: create a task
-// inside a script and see whether the model reads the script result's "Open tasks").
-let scripts = 0
-const held = { isReminded: false, handedBack: new Set<string>() }
+// Subagents whose SubagentHandback call has run and whose report has not yet reached the main
+// loop. A peer prompt counts as a hand-back only from one of these: a mid-run SendMessage
+// arrives in the same envelope.
+// Keyed by agent id.
+const handingBack = new Set<string>()
+// Agents whose hand-back a peer prompt already told, so a foreground Agent result still pending tells none.
+const told = new Set<string>()
+// An agent spawned with a name, by that name: SendMessage addresses it so.
+const idByName = new Map<string, string>()
+// The envelope's opening line, at column zero: the harness indents the report under it. Seen live
+// with an agent id as the sender; a named agent's envelope sender is unverified live, so a name
+// is mapped to its id when it is one this load saw spawn.
+const ENVELOPE = /^<agent-message from="([^"]+)">/
 
-const remindNow = (agentId: string | undefined, tasks: readonly PaneTask[]) => {
-  if (agentId === undefined && scripts > 0) held.isReminded = true
-  return remind(agentId, tasks)
+const forgetHandbacks = () => {
+  handingBack.clear()
+  told.clear()
+  idByName.clear()
 }
 
 // A foreground Agent call resolves when the subagent has handed back; a background
-// launch (`async_launched`) is not one, its report comes as a task notification.
+// launch (`async_launched`) is not one, its report comes as a task notification or a peer prompt.
 const agentHandback = async ($: EngineInterface, ran: ToolCallResult) => {
   const r = ran.result as { status?: unknown; agentId?: unknown } | undefined
   if (r?.status !== 'completed' || typeof r.agentId !== 'string') return ran
-  if (scripts > 0) held.handedBack.add(r.agentId)
+  // Whether a foreground hand-back also yields a peer prompt is unverified: one that already
+  // told this hand-back leaves the result as it is, and one still to come tells nothing.
+  handingBack.delete(r.agentId)
+  if (told.delete(r.agentId)) return ran
   return withContext(ran, handbackText(await currentTasks($).catch(() => []), [r.agentId]))
-}
-
-// What a script's held reminders become on its result: the hand-backs with the open list, or
-// the open list alone; nothing when no task call or hand-back ran in it.
-const heldText = async ($: EngineInterface) => {
-  const ids = [...held.handedBack]
-  const isReminded = held.isReminded
-  held.handedBack.clear()
-  held.isReminded = false
-  if (ids.length === 0 && !isReminded) return undefined
-  const tasks = await currentTasks($).catch(() => [])
-  return ids.length > 0 ? handbackText(tasks, ids) : openText(tasks, false)
-}
-
-// Text a tool result carries, whatever its shape, for an owner id to be looked for in.
-const resultText = (v: unknown) => {
-  if (typeof v === 'string') return v
-  try {
-    return JSON.stringify(v) ?? ''
-  } catch {
-    return ''
-  }
 }
 
 // ---- subagents' isolation ----
@@ -466,6 +453,7 @@ export const register: Register = (on, options) => {
   // its instruction files are loaded afresh.
   on('session.end', async ($, e, next) => {
     const done = await next(e)
+    if (e.reason === 'resume' || e.reason === 'clear') forgetHandbacks()
     if (e.reason === 'resume') {
       await update($, board, () => EMPTY)
       await stopBlink($)
@@ -503,10 +491,20 @@ export const register: Register = (on, options) => {
 
   // A resume keeps its row; `session.send` and the agent's next call restart it.
   on('agent.spawn', async ($, e, next) => {
-    if (e.resume) return next(e)
+    if (e.resume) {
+      const resumed = await next(e)
+      // The new run's peer messages are not the old run's report, however the resume was addressed.
+      // A resume that lands before the old report's prompt.submit drops that report's note (accepted).
+      if (resumed.deny === undefined) {
+        handingBack.delete(e.resume.agentId)
+        told.delete(e.resume.agentId)
+      }
+      return resumed
+    }
     const ran = await next(e)
     if (ran.deny === undefined && ran.agentId !== undefined) {
       const id = ran.agentId
+      if (typeof e.name === 'string' && e.name !== '') idByName.set(e.name, id)
       const startedAt = await $.clock.now()
       // The model it starts on, resolved; $.agent.list() does not carry it. Its effort is
       // unknown until its first request (`turn.step`), so none is drawn before.
@@ -559,7 +557,7 @@ export const register: Register = (on, options) => {
       // A rule a read pulled in rides the next request: a scan after a call keeps the list near
       // live and banks close to an auto-compaction mid-turn.
       const ran = await next(e)
-      queueScan($, e.tool === REPL)
+      queueScan($)
       return ran
     }
     // Only subagents' calls, and only agents this load saw spawn. A REPL script is no row of
@@ -584,41 +582,32 @@ export const register: Register = (on, options) => {
     return ran
   })
 
-  // Inside the hook above, so its scan is queued once the script has ended.
-  on('tool.call', { tool: REPL }, async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
-    scripts++
+  // Marked before the call runs: its report can reach the main loop before this hook resumes.
+  on('tool.call', { tool: HANDBACK }, async ($, e, next) => {
+    const agentId = e.agentId
+    if (agentId === undefined) return next(e)
+    handingBack.add(agentId)
     try {
       const ran = await next(e)
-      return withContext(ran, await heldText($))
+      if (ran.deny !== undefined || ran.isError) handingBack.delete(agentId)
+      return ran
     } catch (err) {
-      // A script that throws leaves nothing held for the next one; another still running keeps its own.
-      if (scripts === 1) {
-        held.isReminded = false
-        held.handedBack.clear()
-      }
+      handingBack.delete(agentId)
       throw err
-    } finally {
-      scripts--
     }
-  })
-
-  // A background agent's report read back by Poll: the hand-back reminder when an open task's
-  // owner is named in a result whose status says it ended. Nothing for any other shape.
-  on('tool.call', { tool: POLL }, async ($, e, next) => {
-    const ran = await next(e)
-    if (e.agentId !== undefined || ran.deny !== undefined) return ran
-    const status = (ran.result as { status?: unknown } | null | undefined)?.status
-    if (typeof status !== 'string' || !FINISHED.has(status)) return ran
-    const tasks = await currentTasks($).catch(() => [])
-    const owners = ownersIn(tasks, resultText(ran.result))
-    return owners.length === 0 ? ran : withContext(ran, handbackText(tasks, owners))
   })
 
   // A message to a finished subagent resumes it from its transcript (SessionSendAddress):
   // the same id and a new run; the `agent.spawn` it also fires (`e.resume`) is passed by.
   on('session.send', async ($, e, next) => {
     const sent = await next(e)
+    // A fallback for the drop in `agent.spawn`'s resume branch; a send may address the agent by name.
+    // A resume that lands before the old report's prompt.submit drops that report's note (accepted).
+    const id = idByName.get(e.to) ?? e.to
+    if (sent.isDelivered && (await read($, agents))[id]?.isRunning === false) {
+      handingBack.delete(id)
+      told.delete(id)
+    }
     if (sent.isDelivered && (await read($, agents))[e.to]?.isRunning === false) {
       const now = await $.clock.now()
       await update($, agents, all => touch(all, e.to, a => (a.isRunning ? a : restart(a, now))))
@@ -643,13 +632,26 @@ export const register: Register = (on, options) => {
     return done
   })
 
-  // A background agent's report, which reaches the main loop
-  // as a task notification (a prompt of its own), carries the reminder in its `context`, the
-  // text left as it came. Other notifications (a background command) get the open list alone.
+  // A background agent's report reaches the main loop as a prompt of its own and carries the
+  // reminder in its `context`, the text left as it came. As a task notification, the owners its
+  // text names are handed back, and another notification (a background command) gets the open
+  // list alone. As a peer prompt (`<agent-message from="…">`, after the agent's SubagentHandback
+  // call), only the sender is: the report body may name other agents, and a peer prompt from an
+  // agent that has not handed back, or in another envelope, gets nothing.
   on('prompt.submit', async ($, e, next) => {
-    if (e.origin.kind !== 'task-notification') return next(e)
-    const tasks = await currentTasks($).catch(() => [])
-    const line = handbackText(tasks, ownersIn(tasks, e.text))
+    const kind = e.origin.kind as string
+    if (kind === 'task-notification') {
+      // A report told this way leaves no hand-back waiting for a peer prompt.
+      for (const id of [...handingBack]) if (namesId(e.text, id)) handingBack.delete(id)
+      const tasks = await currentTasks($).catch(() => [])
+      const line = handbackText(tasks, ownersIn(tasks, e.text))
+      return next(line === undefined ? e : { ...e, context: [...(e.context ?? []), line] })
+    }
+    const sender = kind === 'peer' ? ENVELOPE.exec(e.text)?.[1] : undefined
+    const id = sender === undefined ? undefined : (idByName.get(sender) ?? sender)
+    if (id === undefined || !handingBack.delete(id)) return next(e)
+    told.add(id)
+    const line = handbackText(await currentTasks($).catch(() => []), [id])
     return next(line === undefined ? e : { ...e, context: [...(e.context ?? []), line] })
   })
 
@@ -695,7 +697,7 @@ export const register: Register = (on, options) => {
     // JSON, so a REPL script reads the ids it made; the transcript row shows `remember`'s lines.
     return {
       result: JSON.stringify({ created: made.map(x => ({ id: x.id, subject: x.subject })) }),
-      ...remindNow(e.agentId, written.tasks),
+      ...remind(e.agentId, written.tasks),
     }
   }))).catch(failedOrQueued)
 
@@ -752,7 +754,7 @@ export const register: Register = (on, options) => {
       result: done.results
         .map(r => `Updated task #${r.id} ${r.fields.length > 0 ? r.fields.join(', ') : '(no changes)'}`)
         .join('\n'),
-      ...remindNow(e.agentId, written.tasks),
+      ...remind(e.agentId, written.tasks),
     }
   }))).catch(failedOrQueued)
 

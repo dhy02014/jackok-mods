@@ -135,26 +135,21 @@ test('a /clear empties the instruction list, its bank and its last scan', async 
   expect(await rows(ui)).toEqual(['~/.claude', 'CLAUDE.md'])
 })
 
-test('main-loop calls that end before the scan share one; a REPL script scans once, after it returns', async ($, on) => {
+test('main-loop calls that end before the scan share one, a REPL call and its script’s calls included', async ($, on) => {
   const clock = mock.clock(on, { now: 0 })
   stub(on)
-  const seen = { scans: 0, duringScript: -1 }
+  const seen = { scans: 0 }
   on('session.messages', () => {
     seen.scans++
     return { value: [] } as never
   })
   on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
+  // As the engine runs it: the REPL call returns at dispatch, before its script's calls run.
+  on('tool.call', { tool: 'REPL' }, () => ({ result: 'dispatched' }) as never)
   const settle = () => new Promise(r => setTimeout(r, 0))
   const bash = async () => {
     for (const command of ['a', 'b', 'c']) await $.tool.call({ tool: 'Bash', command })
   }
-  on('tool.call', { tool: 'REPL' }, async () => {
-    await bash()
-    await clock.advance(1)
-    await settle()
-    seen.duringScript = seen.scans
-    return { result: 'done' } as never
-  })
   await $.session.start(START)
   await clock.advance(1)
   await settle()
@@ -164,42 +159,13 @@ test('main-loop calls that end before the scan share one; a REPL script scans on
   await settle()
   expect(seen.scans - base).toBe(1)
   await $.tool.call({ tool: 'REPL', code: 'x' } as never)
-  // Nothing was scanned while the script ran; its return queued one scan.
-  expect(seen.duringScript - base).toBe(1)
+  await bash()
   await clock.advance(1)
   await settle()
   expect(seen.scans - base).toBe(2)
-})
-
-test('a script still running in the background does not hold back the scan of a script that ends', async ($, on) => {
-  const clock = mock.clock(on, { now: 0 })
-  stub(on)
-  const seen = { scans: 0 }
-  on('session.messages', () => {
-    seen.scans++
-    return { value: [] } as never
-  })
-  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
-  const settle = () => new Promise(r => setTimeout(r, 0))
-  const gate: { open?: () => void } = {}
-  on('tool.call', { tool: 'REPL' }, async (_, e) => {
-    if ((e as { code?: string }).code === 'background') await new Promise<void>(r => (gate.open = r))
-    else await $.tool.call({ tool: 'Bash', command: 'a' })
-    return { result: 'done' } as never
-  })
-  await $.session.start(START)
+  // A call after the scan ran queues the next.
+  await bash()
   await clock.advance(1)
   await settle()
-  const base = seen.scans
-  const background = $.tool.call({ tool: 'REPL', code: 'background' } as never)
-  await settle()
-  await $.tool.call({ tool: 'REPL', code: 'short' } as never)
-  await clock.advance(1)
-  await settle()
-  expect(seen.scans - base).toBe(1)
-  gate.open?.()
-  await background
-  await clock.advance(1)
-  await settle()
-  expect(seen.scans - base).toBe(2)
+  expect(seen.scans - base).toBe(3)
 })

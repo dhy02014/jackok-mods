@@ -72,8 +72,200 @@ test('a background agent’s task notification carries the hand-back reminder; a
   expect(seen.at(-1)).toBeUndefined()
 })
 
-// Code mode's REPL as the engine runs it: the script's tool calls go through tool.call while
-// the REPL call itself is still running.
+// A background agent's report in auto mode: its SubagentHandback call, then a peer prompt in the envelope.
+const peerSetup = async ($: Parameters<Parameters<typeof test>[1]>[0], on: Parameters<Parameters<typeof test>[1]>[1]) => {
+  stub(on)
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_, e) => {
+    seen.push(e.context)
+    return { text: e.text }
+  })
+  const handback = { deny: undefined as string | undefined }
+  on('tool.call', { tool: 'SubagentHandback' }, () => (handback.deny === undefined ? { result: 'ok' } : { deny: handback.deny }) as never)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'First', description: 'd' })
+  await $.tool.call({ tool: CREATE, subject: 'Second', description: 'd' })
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1b2c3d4e5f60718' })
+  await $.tool.call({ tool: UPDATE, taskId: '2', status: 'in_progress', owner: 'b9c8d7e6f5a40312' })
+  const handBack = (agentId: string) => $.tool.call({ tool: 'SubagentHandback', message: 'r', agentId } as never)
+  const peer = (text: string) => $.prompt.submit({ text, wait: false, origin: { kind: 'peer' } as never })
+  return { seen, handback, handBack, peer }
+}
+
+const OPEN_BOTH = 'Open tasks: #1 [in_progress] First (owner: a1b2c3d4), #2 [in_progress] Second (owner: b9c8d7e6)'
+
+test('a peer prompt after its sender’s SubagentHandback carries the hand-back reminder for that sender alone', async ($, on) => {
+  const { seen, handBack, peer } = await peerSetup($, on)
+  await handBack('a1b2c3d4e5f60718')
+  // The report body names the other owner too: only the envelope's sender handed back.
+  const report = '<agent-message from="a1b2c3d4e5f60718">\n  Done; b9c8d7e6f5a40312 still owns #2.\n</agent-message>'
+  const r = await peer(report)
+  expect(r.text).toBe(report)
+  expect(seen.at(-1)).toEqual([`Agent a1b2c3d4 handed back; it owns #1 — reassign, clear owner, or complete it. ${OPEN_BOTH}`])
+  // Told once: a second message from the same agent is no hand-back.
+  await peer('<agent-message from="a1b2c3d4e5f60718">\n  again\n</agent-message>')
+  expect(seen.at(-1)).toBeUndefined()
+})
+
+test('a peer prompt with no hand-back before it, a refused hand-back, or another envelope carries nothing', async ($, on) => {
+  const { seen, handback, handBack, peer } = await peerSetup($, on)
+  // A mid-run SendMessage arrives in the same envelope.
+  await peer('<agent-message from="a1b2c3d4e5f60718">\n  progress\n</agent-message>')
+  expect(seen.at(-1)).toBeUndefined()
+  handback.deny = 'no'
+  await handBack('a1b2c3d4e5f60718')
+  await peer('<agent-message from="a1b2c3d4e5f60718">\n  report\n</agent-message>')
+  expect(seen.at(-1)).toBeUndefined()
+  // Another session's message naming an owner, and an envelope not at column zero.
+  handback.deny = undefined
+  await handBack('b9c8d7e6f5a40312')
+  await peer('<cross-session-message from="b9c8d7e6f5a40312">\n  b9c8d7e6f5a40312 done\n</cross-session-message>')
+  expect(seen.at(-1)).toBeUndefined()
+  await peer(' <agent-message from="b9c8d7e6f5a40312">\n  done\n</agent-message>')
+  expect(seen.at(-1)).toBeUndefined()
+})
+
+// A peer prompt submitted while the SubagentHandback call is still running is its report too.
+test('a peer prompt that arrives before the SubagentHandback call returns still carries the note', async ($, on) => {
+  stub(on)
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_, e) => {
+    seen.push(e.context)
+    return { text: e.text }
+  })
+  const gate: { open?: () => void } = {}
+  on('tool.call', { tool: 'SubagentHandback' }, async () => {
+    await new Promise<void>(r => (gate.open = r))
+    return { result: 'ok' } as never
+  })
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'First', description: 'd' })
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1b2c3d4e5f60718' })
+  const call = $.tool.call({ tool: 'SubagentHandback', message: 'r', agentId: 'a1b2c3d4e5f60718' } as never)
+  while (gate.open === undefined) await new Promise(r => setTimeout(r, 0))
+  await $.prompt.submit({ text: '<agent-message from="a1b2c3d4e5f60718">\n  r\n</agent-message>', wait: false, origin: { kind: 'peer' } as never })
+  expect(seen.at(-1)).toEqual([
+    'Agent a1b2c3d4 handed back; it owns #1 — reassign, clear owner, or complete it. Open tasks: #1 [in_progress] First (owner: a1b2c3d4)',
+  ])
+  gate.open()
+  await call
+})
+
+test('a task notification naming a handing-back agent leaves no hand-back for a later peer prompt', async ($, on) => {
+  const { seen, handBack, peer } = await peerSetup($, on)
+  await handBack('a1b2c3d4e5f60718')
+  await $.prompt.submit({ text: '<task-notification>\n<task-id>a1b2c3d4e5f60718</task-id>\n</task-notification>', wait: false, origin: { kind: 'task-notification' } })
+  expect(seen.at(-1)).toHaveLength(1)
+  await peer('<agent-message from="a1b2c3d4e5f60718">\n  r\n</agent-message>')
+  expect(seen.at(-1)).toBeUndefined()
+})
+
+// Subagents spawned here (a1, a2, ...), each able to hand back and be messaged.
+const agentSetup = async ($: Parameters<Parameters<typeof test>[1]>[0], on: Parameters<Parameters<typeof test>[1]>[1]) => {
+  agentStub(on)
+  on('session.send', () => ({ isDelivered: true as const }))
+  on('tool.call', { tool: 'SubagentHandback' }, () => ({ result: 'ok' }) as never)
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_, e) => {
+    seen.push(e.context)
+    return { text: e.text }
+  })
+  const handBack = (agentId: string) => $.tool.call({ tool: 'SubagentHandback', message: 'r', agentId } as never)
+  const peer = (from: string) => $.prompt.submit({ text: `<agent-message from="${from}">\n  r\n</agent-message>`, wait: false, origin: { kind: 'peer' } as never })
+  // A foreground Agent call: what its subagent does before the call resolves, then AGENT_DONE (agent a1).
+  const fg = { run: async () => {} }
+  on('tool.call', { tool: 'Agent' }, async () => {
+    await fg.run()
+    return { result: AGENT_DONE } as never
+  })
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'Delegated', description: 'd' })
+  return { seen, handBack, peer, fg }
+}
+
+const A1_NOTE = 'Agent a1 handed back; it owns #1 — reassign, clear owner, or complete it. Open tasks: #1 [in_progress] Delegated (owner: a1)'
+
+test('a hand-back whose peer prompt never came is forgotten once its agent is resumed', async ($, on) => {
+  const { seen, handBack, peer } = await agentSetup($, on)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Work' } as never)
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
+  await handBack('a1')
+  await $.turn.complete(done('a1'))
+  await $.session.send({ to: 'a1', text: 'next' } as never)
+  // The resumed run's progress message.
+  await peer('a1')
+  expect(seen.at(-1)).toBeUndefined()
+})
+
+test('a hand-back whose peer prompt never came is forgotten at /clear', async ($, on) => {
+  const { seen, handBack, peer } = await agentSetup($, on)
+  await handBack('a1')
+  await $.session.end({ reason: 'clear' } as never)
+  await $.tool.call({ tool: CREATE, subject: 'Delegated', description: 'd' })
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
+  await peer('a1')
+  expect(seen.at(-1)).toBeUndefined()
+})
+
+test('a named agent’s envelope sender is mapped to its id', async ($, on) => {
+  const { seen, handBack, peer } = await agentSetup($, on)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Work', name: 'scout' } as never)
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
+  await handBack('a1')
+  await peer('scout')
+  expect(seen.at(-1)).toEqual([A1_NOTE])
+})
+
+test('a hand-back is forgotten when its agent is resumed by name, with no send seen', async ($, on) => {
+  const { seen, handBack, peer } = await agentSetup($, on)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Work', name: 'scout' } as never)
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
+  await handBack('a1')
+  await $.agent.spawn({ prompt: 'next', subagentType: 'explorer', description: '', resume: { agentId: 'a1' } } as never)
+  await peer('scout')
+  expect(seen.at(-1)).toBeUndefined()
+})
+
+test('a SubagentHandback call that errors leaves no hand-back for a peer prompt', async ($, on) => {
+  stub(on)
+  const seen: (readonly string[] | undefined)[] = []
+  on('prompt.submit', (_, e) => {
+    seen.push(e.context)
+    return { text: e.text }
+  })
+  on('tool.call', { tool: 'SubagentHandback' }, () => ({ result: 'x', isError: true }) as never)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'First', description: 'd' })
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1b2c3d4e5f60718' })
+  await $.tool.call({ tool: 'SubagentHandback', message: 'r', agentId: 'a1b2c3d4e5f60718' } as never)
+  await $.prompt.submit({ text: '<agent-message from="a1b2c3d4e5f60718">\n  r\n</agent-message>', wait: false, origin: { kind: 'peer' } as never })
+  expect(seen.at(-1)).toBeUndefined()
+})
+
+test('a foreground hand-back with no peer prompt is told once, on the Agent result', async ($, on) => {
+  const { seen, handBack, peer, fg } = await agentSetup($, on)
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
+  fg.run = async () => {
+    await handBack('a1')
+  }
+  expect(contextOf(await $.tool.call({ tool: 'Agent', prompt: 'p', description: 'Do it', subagent_type: 'explorer' } as never))).toEqual([A1_NOTE])
+  await peer('a1')
+  expect(seen.at(-1)).toBeUndefined()
+})
+
+test('a foreground hand-back whose peer prompt comes before the Agent result is told once, on the peer prompt', async ($, on) => {
+  const { seen, handBack, peer, fg } = await agentSetup($, on)
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
+  fg.run = async () => {
+    await handBack('a1')
+    await peer('a1')
+  }
+  expect(contextOf(await $.tool.call({ tool: 'Agent', prompt: 'p', description: 'Do it', subagent_type: 'explorer' } as never))).toEqual([])
+  expect(seen.at(-1)).toEqual([A1_NOTE])
+})
+
+// The REPL stub runs its script inside the call, while the engine returns at dispatch and runs
+// the script after; the nesting here only shows that no REPL hook alters the calls inside.
 const replTool = (on: Parameters<Parameters<typeof test>[1]>[1]) => {
   const repl = { script: async (): Promise<unknown> => undefined }
   on('tool.call', { tool: 'REPL' }, async () => {
@@ -83,7 +275,7 @@ const replTool = (on: Parameters<Parameters<typeof test>[1]>[1]) => {
   return repl
 }
 
-test('a REPL script’s task calls keep their reminders; the script’s result also carries one current list', async ($, on) => {
+test('a REPL script’s task calls keep their reminders; the script’s result carries nothing extra', async ($, on) => {
   stub(on)
   const repl = replTool(on)
   await $.session.start(START)
@@ -94,37 +286,25 @@ test('a REPL script’s task calls keep their reminders; the script’s result a
     inner.push(contextOf(await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress' })))
     return undefined
   }
-  expect(contextOf(await $.tool.call({ tool: 'REPL', code: 'x' } as never))).toEqual(['Open tasks: #1 [in_progress], #2 [pending]'])
-  // Kept per call too: a REPL result's context may not reach the model.
+  expect(contextOf(await $.tool.call({ tool: 'REPL', code: 'x' } as never))).toEqual([])
   expect(inner).toEqual([
     ['Open tasks: #1 [pending]'],
     ['Open tasks: #1 [pending], #2 [pending]'],
     ['Open tasks: #1 [in_progress], #2 [pending]'],
   ])
-  // A script that makes no task call carries none.
-  repl.script = async () => $.tool.call({ tool: LIST }).then(() => undefined)
-  expect(contextOf(await $.tool.call({ tool: 'REPL', code: 'x' } as never))).toEqual([])
-  // Once a script ends, refused or thrown, a direct call carries its own reminder again.
-  repl.script = async () => 'refused'
-  await $.tool.call({ tool: 'REPL', code: 'x' } as never)
-  repl.script = async () => {
-    throw new Error('boom')
-  }
-  await Promise.resolve($.tool.call({ tool: 'REPL', code: 'x' } as never)).catch(() => undefined)
   expect(contextOf(await $.tool.call({ tool: UPDATE, taskId: '2', status: 'in_progress' }))).toEqual([
     'Open tasks: #1 [in_progress], #2 [in_progress]',
   ])
 })
 
-test('with no REPL call around them, task calls keep their per-call reminders', async ($, on) => {
+test('parallel task calls each carry their own reminder', async ($, on) => {
   stub(on)
-  replTool(on)
   await $.session.start(START)
   const made = await Promise.all([$.tool.call({ tool: CREATE, subject: 'One' }), $.tool.call({ tool: CREATE, subject: 'Two' })])
   expect(made.map(contextOf).every(c => c.length === 1 && c[0]!.startsWith('Open tasks: #1 [pending]'))).toBe(true)
 })
 
-test('an Agent hand-back inside a REPL script is told on its own result and again on the script’s', async ($, on) => {
+test('an Agent hand-back inside a REPL script is told on its own result only', async ($, on) => {
   stub(on)
   on('tool.call', { tool: 'Agent' }, () => ({ result: AGENT_DONE }) as never)
   const repl = replTool(on)
@@ -137,66 +317,8 @@ test('an Agent hand-back inside a REPL script is told on its own result and agai
     return undefined
   }
   const handed = 'Agent a1 handed back; it owns #1 — reassign, clear owner, or complete it. Open tasks: #1 [in_progress] Delegated (owner: a1)'
-  expect(contextOf(await $.tool.call({ tool: 'REPL', code: 'x' } as never))).toEqual([handed])
-  expect(inner).toEqual([handed])
-})
-
-test('a Poll result naming an open task’s owner carries the hand-back reminder; one naming none, nothing', async ($, on) => {
-  stub(on)
-  let polled: unknown = { status: 'completed', task_id: 'a1b2c3d4e5f60718', output: 'report' }
-  on('tool.call', { tool: 'Poll' }, () => ({ result: polled }) as never)
-  await $.session.start(START)
-  await $.tool.call({ tool: CREATE, subject: 'Delegated' })
-  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1b2c3d4e5f60718' })
-  expect(contextOf(await $.tool.call({ tool: 'Poll' } as never))).toEqual([
-    'Agent a1b2c3d4 handed back; it owns #1 — reassign, clear owner, or complete it. Open tasks: #1 [in_progress] Delegated (owner: a1b2c3d4)',
-  ])
-  // Every status that says the work ended counts.
-  for (const status of ['failed', 'killed', 'stopped']) {
-    polled = { status, task_id: 'a1b2c3d4e5f60718' }
-    expect(contextOf(await $.tool.call({ tool: 'Poll' } as never))).toHaveLength(1)
-  }
-  polled = { status: 'running', task_id: 'b9' }
-  expect(contextOf(await $.tool.call({ tool: 'Poll' } as never))).toEqual([])
-  // Still running, not started, an unknown status, or a shape with no status (a plain string): no note.
-  for (const p of ['running', 'pending', 'done?'].map(status => ({ status, task_id: 'a1b2c3d4e5f60718' })) as unknown[]) {
-    polled = p
-    expect(contextOf(await $.tool.call({ tool: 'Poll' } as never))).toEqual([])
-  }
-  polled = 'agent a1b2c3d4e5f60718 finished'
-  expect(contextOf(await $.tool.call({ tool: 'Poll' } as never))).toEqual([])
-})
-
-test('a REPL script that throws after a task call leaves nothing held for the next script', async ($, on) => {
-  stub(on)
-  const repl = replTool(on)
-  await $.session.start(START)
-  repl.script = async () => {
-    await $.tool.call({ tool: CREATE, subject: 'One' })
-    throw new Error('boom')
-  }
-  await Promise.resolve($.tool.call({ tool: 'REPL', code: 'x' } as never)).catch(() => undefined)
-  repl.script = async () => undefined
   expect(contextOf(await $.tool.call({ tool: 'REPL', code: 'x' } as never))).toEqual([])
-})
-
-test('a script that throws while another runs leaves the other’s held reminder in place', async ($, on) => {
-  stub(on)
-  const gate: { open?: () => void } = {}
-  on('tool.call', { tool: 'REPL' }, async (_, e) => {
-    if ((e as { code?: string }).code === 'long') {
-      await $.tool.call({ tool: CREATE, subject: 'One' })
-      await new Promise<void>(r => (gate.open = r))
-      return { result: 'done' } as never
-    }
-    throw new Error('boom')
-  })
-  await $.session.start(START)
-  const long = $.tool.call({ tool: 'REPL', code: 'long' } as never)
-  while (gate.open === undefined) await new Promise(r => setTimeout(r, 0))
-  await Promise.resolve($.tool.call({ tool: 'REPL', code: 'short' } as never)).catch(() => undefined)
-  gate.open()
-  expect(contextOf(await long)).toEqual(['Open tasks: #1 [pending]'])
+  expect(inner).toEqual([handed])
 })
 
 test('a queued task call runs only with more than the margin left; an engine with no budget always runs it', () => {

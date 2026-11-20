@@ -252,12 +252,14 @@ export const openText = (tasks: readonly PaneTask[], withSubject = true) => {
   return `Open tasks: ${rows.join(', ')}`
 }
 
-// The owners of open tasks that `text` names as a whole token: a notification's text
-// is the engine's prose, so the id is looked for rather than parsed out of a format.
+// Whether `text` names `id` as a whole token: a notification's text is the engine's
+// prose, so the id is looked for rather than parsed out of a format.
+export const namesId = (text: string, id: string) =>
+  new RegExp(`(?:^|[^A-Za-z0-9])${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^A-Za-z0-9]|$)`).test(text)
+
+// The owners of open tasks that `text` names as a whole token.
 export const ownersIn = (tasks: readonly PaneTask[], text: string) =>
-  [...new Set(openOf(tasks).flatMap(t => (t.owner !== undefined ? [t.owner] : [])))].filter(id =>
-    new RegExp(`(?:^|[^A-Za-z0-9])${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^A-Za-z0-9]|$)`).test(text),
-  )
+  [...new Set(openOf(tasks).flatMap(t => (t.owner !== undefined ? [t.owner] : [])))].filter(id => namesId(text, id))
 
 // The reminder at a hand-back: the tasks each agent owns, then the open list. With no
 // agent named (a notification no owner matched) the open list alone.
