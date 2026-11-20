@@ -41,6 +41,8 @@ export const stub = (
     language?: string
     /** The store refuses a write while it holds more lists than this. */
     boardCap?: number
+    /** While `isOn`, a store write never settles. */
+    stallWrites?: { isOn: boolean }
   } = {},
 ) => {
   const env: Record<string, string> = o.env ?? { HOME }
@@ -48,7 +50,8 @@ export const stub = (
   const storeSets: string[] = []
   const boards = () => [...store.keys()].filter(k => k.startsWith('board:'))
   on('store.get', ($, e) => ({ value: store.has(e.key) ? JSON.parse(JSON.stringify(store.get(e.key))) : undefined }))
-  on('store.set', ($, e) => {
+  on('store.set', async ($, e) => {
+    if (o.stallWrites?.isOn === true) await new Promise(() => undefined)
     if (o.boardCap !== undefined && boards().length > o.boardCap) return { deny: 'store full' }
     storeSets.push(e.key)
     store.set(e.key, JSON.parse(JSON.stringify(e.value)))
@@ -128,6 +131,9 @@ export const mountPane = ($: Parameters<Parameters<typeof test>[1]>[0]) =>
 
 // What the model reads: the plugin's text, or the error a refusal became.
 export const said = (r: { result?: unknown; text?: string; deny?: string }) => String(r.deny ?? r.text ?? r.result)
+
+// task_create's result for these `[id, subject]` pairs, in order.
+export const created = (...made: [string, string][]) => JSON.stringify({ created: made.map(([id, subject]) => ({ id, subject })) })
 
 export const SID2_BOARD = {
   'board:sid-2': {

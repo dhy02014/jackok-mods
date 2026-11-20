@@ -1,12 +1,12 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { START, CREATE, UPDATE, LIST, stub, mountPane, said, agentStub, mountRows, done, spawn, opening, prompt, rows } from './helpers'
+import { START, CREATE, UPDATE, LIST, stub, mountPane, said, created, agentStub, mountRows, done, spawn, opening, prompt, rows } from './helpers'
 
 test('task_create’s description tells of the `#N` claim; task_update’s of reassigning', async ($, on) => {
   const { specText } = stub(on)
   await $.session.start(START)
   expect(specText[0]).toContain('An Agent description starting `#3 ` claims task 3.')
   expect(specText[1]).toContain('`owner` reassigns ("" clears).')
-  expect(specText.join('').length).toBeLessThan(1050)
+  expect(specText.join('').length).toBeLessThan(1100)
 })
 
 test('with a language set, task_create and task_update ask for subject and activeForm in it; task_list does not',async ($, on) => {
@@ -14,7 +14,7 @@ test('with a language set, task_create and task_update ask for subject and activ
   await $.session.start(START)
   const asked = ' Write subject and activeForm in Korean.'
   expect([specText[0]!.includes(asked), specText[1]!.includes(asked), specText[2]!.includes(asked)]).toEqual([true, true, false])
-  expect(specText.join('').length).toBeLessThan(1150)
+  expect(specText.join('').length).toBeLessThan(1200)
 })
 
 test('with no language set, no tool spec names a language', async ($, on) => {
@@ -36,7 +36,7 @@ test('task_create takes several tasks as `tasks`: numbered in order, all or noth
         ],
       }),
     ),
-  ).toBe('Created #1, #2')
+  ).toBe(created(['1', 'Read'], ['2', 'Write']))
   expect(json('sid-1', '1')).toMatchObject({ subject: 'Read', status: 'in_progress', activeForm: 'Reading' })
   expect(json('sid-1', '2')).toMatchObject({ subject: 'Write', status: 'pending' })
   // One bad entry refuses the whole call: no id is spent.
@@ -45,10 +45,10 @@ test('task_create takes several tasks as `tasks`: numbered in order, all or noth
   ).toBe('task_create needs a non-empty subject in every task.')
   expect(said(await $.tool.call({ tool: CREATE, tasks: [] }))).toBe('task_create needs a subject, or a non-empty tasks list.')
   expect(said(await $.tool.call({ tool: CREATE, subject: 'Next', description: 'd3' }))).toBe(
-    'Created #3',
+    created(['3', 'Next']),
   )
   // description is optional: a task without one is written with "".
-  expect(said(await $.tool.call({ tool: CREATE, subject: 'Bare' }))).toBe('Created #4')
+  expect(said(await $.tool.call({ tool: CREATE, subject: 'Bare' }))).toBe(created(['4', 'Bare']))
   expect(json('sid-1', '4')).toMatchObject({ subject: 'Bare', description: '' })
 })
 
@@ -86,7 +86,7 @@ test('a stored task whose id is not decimal is not read back', async ($, on) => 
   })
   await $.session.start(START)
   expect(said(await $.tool.call({ tool: LIST }))).toBe('#2 [pending] Good')
-  expect(said(await $.tool.call({ tool: CREATE, subject: 'Next', description: '' }))).toBe('Created #3')
+  expect(said(await $.tool.call({ tool: CREATE, subject: 'Next', description: '' }))).toBe(created(['3', 'Next']))
 })
 
 test('an in-progress mark blinks while a task is in progress and rests once none is', async ($, on) => {
@@ -215,4 +215,43 @@ test('each task is one keyed element a scroll can bring into view', async ($, on
   const ui = await mountRows($, 5)
   for (let i = 1; i <= 12; i++) expect(await ui.find({ key: `pane-task:${i}` })).toBeDefined()
   expect(await ui.find({ key: 'pane-owned:a1' })).toBeDefined()
+})
+
+test('task_create returns the made ids and subjects as JSON, in input order', async ($, on) => {
+  stub(on)
+  await $.session.start(START)
+  const r = JSON.parse(said(await $.tool.call({ tool: CREATE, tasks: [{ subject: 'B first' }, { subject: 'A second' }] })))
+  expect(r).toEqual({ created: [{ id: '1', subject: 'B first' }, { id: '2', subject: 'A second' }] })
+})
+
+test('a numeric taskId and numeric addBlockedBy items are taken as their ids', async ($, on) => {
+  const { json } = stub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'One' }, { subject: 'Two' }] })
+  expect(said(await $.tool.call({ tool: UPDATE, taskId: 2, addBlockedBy: [1] } as never))).toBe('Updated task #2 blockedBy')
+  expect(json('sid-1', '2')).toMatchObject({ blockedBy: ['1'] })
+  expect(json('sid-1', '1')).toMatchObject({ blocks: ['2'] })
+  expect(said(await $.tool.call({ tool: UPDATE, updates: [{ taskId: 1, status: 'completed' }] } as never))).toBe('Updated task #1 status')
+  expect(json('sid-1', '1')).toMatchObject({ status: 'completed' })
+  expect(said(await $.tool.call({ tool: UPDATE, taskId: 1.5, status: 'completed' } as never))).toMatch(/needs a taskId/)
+})
+
+test('task calls fired side by side all land: create with create, create with update', async ($, on) => {
+  const { store } = stub(on)
+  await $.session.start(START)
+  const both = await Promise.all([
+    $.tool.call({ tool: CREATE, subject: 'Left' }),
+    $.tool.call({ tool: CREATE, subject: 'Right' }),
+  ])
+  expect(both.map(r => JSON.parse(said(r)).created[0].id).sort()).toEqual(['1', '2'])
+  expect(said(await $.tool.call({ tool: LIST }))).toBe('#1 [pending] Left\n#2 [pending] Right')
+  await Promise.all([
+    $.tool.call({ tool: UPDATE, taskId: '1', status: 'completed' }),
+    $.tool.call({ tool: CREATE, subject: 'Third' }),
+    $.tool.call({ tool: UPDATE, taskId: '2', status: 'in_progress' }),
+  ])
+  const listed = '#2 [in_progress] Right\n#3 [pending] Third\n(1 completed, not listed)'
+  expect(said(await $.tool.call({ tool: LIST }))).toBe(listed)
+  const stored = (store.get('board:sid-1') as { tasks: { id: string; status: string }[] }).tasks
+  expect(stored.map(x => `${x.id}:${x.status}`)).toEqual(['1:completed', '2:in_progress', '3:pending'])
 })

@@ -1,5 +1,5 @@
 import { expect, test } from 'claude-code/testing'
-import { START, CREATE, UPDATE, LIST, stub } from './helpers'
+import { START, CREATE, UPDATE, LIST, stub, created as createdJson } from './helpers'
 
 type Ctx = Parameters<Parameters<typeof test>[1]>[0]
 
@@ -48,6 +48,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
     const updates = await draw.use(toolRowProps(UPDATE, { updates: [{ taskId: '11', status: 'completed' }, { taskId: '12', owner: 'a1' }] }))
     expect(updates?.input).toEqual({ updates: 2 })
     expect((await draw.use(toolRowProps(UPDATE, { taskId: '5', status: 'completed' })))?.input).toEqual({ updates: 1 })
+    // A numeric id, as a script may send it, counts too.
+    expect((await draw.use(toolRowProps(UPDATE, { updates: [{ taskId: 5 }, { taskId: 6 }] })))?.input).toEqual({ updates: 2 })
     for (const p of [batch, updates]) expect(noUndefined(p?.input)).toBe(true)
   })
 
@@ -75,8 +77,8 @@ for (const surface of ['terminal', 'desktop'] as const) {
       tool_use_id: 'tu1',
       tasks: [{ subject: '파서로 통합 (라우터)' }, { subject: 'Second\n line', status: 'in_progress' }, { subject: long }],
     })
-    expect(created).toMatchObject({ result: 'Created #1, #2, #3' })
-    const original = 'Created #1, #2, #3'
+    const original = createdJson(['1', '파서로 통합 (라우터)'], ['2', 'Second\n line'], ['3', long])
+    expect(created).toMatchObject({ result: original })
     const asString = await draw.result(resultProps(CREATE, original))
     const lines = (asString?.output as string).split('\n')
     expect(lines).toEqual(['#1 파서로 통합 (라우터)', '#2 Second line', `#3 ${'z'.repeat(59)}…`])
@@ -156,5 +158,26 @@ for (const surface of ['terminal', 'desktop'] as const) {
     expect(noId).toMatchObject({ result: 'Updated task #1 status' })
     const noIdRow = resultProps(UPDATE, 'Updated task #1 status', { id: 'undefined' })
     expect(await draw.result(noIdRow)).toEqual(noIdRow)
+    // JSON that is not task_create's result shape is drawn as it came too.
+    for (const text of ['{"created":[]}', '{"created":[{"id":1}]}', 'null', '{']) {
+      const row = resultProps(CREATE, text, { id: 'after-resume' })
+      expect(await draw.result(row)).toEqual(row)
+    }
+  })
+
+  test(`${surface}: a task_create row with no kept lines is rebuilt from its JSON result, in the shape it came in`, async ($, on) => {
+    stub(on)
+    const draw = drawer($, on)
+    await $.session.start(START)
+    const json = createdJson(['7', 'Seven'], ['8', 'Eight\n line'])
+    const asString = await draw.result(resultProps(CREATE, json, { id: 'not-kept' }))
+    expect(asString?.output).toBe('#7 Seven\n#8 Eight line')
+    expect((await draw.result(resultProps(CREATE, [{ type: 'text', text: json }], { id: 'not-kept' })))?.output).toEqual([
+      { type: 'text', text: '#7 Seven\n#8 Eight line' },
+    ])
+    expect((await draw.result(resultProps(CREATE, { content: json }, { id: 'not-kept' })))?.output).toEqual({ content: '#7 Seven\n#8 Eight line' })
+    // An update keeps no such fallback: its result is prose.
+    const update = resultProps(UPDATE, json, { id: 'not-kept' })
+    expect(await draw.result(update)).toEqual(update)
   })
 }

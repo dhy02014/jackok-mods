@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { START, HOME, CREATE, UPDATE, LIST, stub, mountPane, said, SID2_BOARD, done, instructionStub, reminder, rows } from './helpers'
+import { START, HOME, CREATE, UPDATE, LIST, stub, mountPane, said, created, SID2_BOARD, done, instructionStub, reminder, rows } from './helpers'
 import type { StoredBoard } from './helpers'
 
 test('built-in tool descriptions stay as they are; task_create teaches the `#N` claim and replaces the built-in task tools', async ($, on) => {
@@ -16,7 +16,7 @@ test('create, update and delete keep the list in the store alone: no file write,
   const cli = `${HOME}/.claude/tasks/sid-1`
   const { files, writes, reads, argvs, json, storeSets } = stub(on, { files: { [`${cli}/5.json`]: '{}', [`${cli}/.highwatermark`]: '7' } })
   await $.session.start(START)
-  expect(said(await $.tool.call({ tool: CREATE, tasks: [{ subject: 'One' }, { subject: 'Two' }] }))).toBe('Created #1, #2')
+  expect(said(await $.tool.call({ tool: CREATE, tasks: [{ subject: 'One' }, { subject: 'Two' }] }))).toBe(created(['1', 'One'], ['2', 'Two']))
   await $.tool.call({ tool: UPDATE, taskId: '1', status: 'completed' })
   await $.tool.call({ tool: UPDATE, taskId: '2', status: 'deleted' })
   expect(json('sid-1', '1')).toMatchObject({ subject: 'One', status: 'completed' })
@@ -51,8 +51,8 @@ test('the three tools are registered in front with the built-ins’ required fie
     { name: 'task_list', isDeferred: true, required: undefined },
   ])
   // Descriptions plus schemas stay small: `updates` and `tasks` cost ~100 characters each
-  // once and save a whole tool call per batched update or create.
-  expect(specText.join('').length).toBeLessThan(1050)
+  // once and save a whole tool call per batched update or create; the result's JSON shape ~45.
+  expect(specText.join('').length).toBeLessThan(1100)
   // The spec teaches the `#N` claim.
   expect(specText.join('')).toContain('starting `#3 ` claims task 3')
 })
@@ -63,7 +63,7 @@ test('create → update → list: the pane, the tool results and the store agree
   expect(opened).toEqual(['manage-pane'])
 
   expect(said(await $.tool.call({ tool: CREATE, subject: 'Read the types', description: 'd1' }))).toBe(
-    'Created #1',
+    created(['1', 'Read the types']),
   )
   await $.tool.call({ tool: CREATE, subject: 'Write the pane', description: 'd2', activeForm: 'Writing the pane' })
   await $.tool.call({ tool: CREATE, subject: 'Old step', description: 'd3' })
@@ -139,14 +139,14 @@ test('ids only climb: a deleted id is not reused, a /clear starts at 1, a resume
   await $.tool.call({ tool: CREATE, subject: 'A', description: '' })
   await $.tool.call({ tool: CREATE, subject: 'B', description: '' })
   await $.tool.call({ tool: UPDATE, taskId: '2', status: 'deleted' })
-  expect(said(await $.tool.call({ tool: CREATE, subject: 'C', description: '' }))).toBe('Created #3')
+  expect(said(await $.tool.call({ tool: CREATE, subject: 'C', description: '' }))).toBe(created(['3', 'C']))
 
   // /clear: the old list goes, and the new session id counts from 1 under its own key.
   await $.session.end({ reason: 'clear', sessionId: 'sid-1', resume: {} as never })
   session.id = 'sid-2'
   expect(said(await $.tool.call({ tool: LIST }))).toBe('No tasks found.')
   expect(said(await $.tool.call({ tool: CREATE, subject: 'Fresh', description: '' }))).toBe(
-    'Created #1',
+    created(['1', 'Fresh']),
   )
   expect(json('sid-2', '1')).toMatchObject({ subject: 'Fresh' })
   expect(json('sid-1', '3')).toMatchObject({ subject: 'C' })
@@ -155,7 +155,7 @@ test('ids only climb: a deleted id is not reused, a /clear starts at 1, a resume
   session.id = 'sid-old'
   expect(said(await $.tool.call({ tool: LIST }))).toBe('#4 [pending] Left open')
   expect(said(await $.tool.call({ tool: CREATE, subject: 'Next', description: '' }))).toBe(
-    'Created #8',
+    created(['8', 'Next']),
   )
   expect(said(await $.tool.call({ tool: UPDATE, taskId: '4', status: 'completed' }))).toBe('Updated task #4 status')
 })
@@ -234,7 +234,7 @@ test('a store that refuses a write is pruned to 25 lists and written once more',
   for (let i = 0; i < 40; i++) old[`board:s${i}`] = { at: 1000 + i, lastId: 0, tasks: [] }
   const { store, boards, json } = stub(on, { store: old, boardCap: 30 })
   await $.session.start(START)
-  expect(said(await $.tool.call({ tool: CREATE, subject: 'Saved', description: '' }))).toBe('Created #1')
+  expect(said(await $.tool.call({ tool: CREATE, subject: 'Saved', description: '' }))).toBe(created(['1', 'Saved']))
   expect(json('sid-1', '1')).toMatchObject({ subject: 'Saved' })
   expect(boards()).toHaveLength(26)
   expect(store.has('board:s14')).toBe(false)
@@ -252,7 +252,7 @@ test('a /resume, which runs no session.start, gets its list back on the next mai
   await $.turn.complete(main)
   ui = await mountPane($)
   expect(await ui.find({ type: 'Text', text: 'Resumed work' })).toBeDefined()
-  expect(said(await $.tool.call({ tool: CREATE, subject: 'Next', description: '' }))).toBe('Created #4')
+  expect(said(await $.tool.call({ tool: CREATE, subject: 'Next', description: '' }))).toBe(created(['4', 'Next']))
 })
 
 test('a write keeps the tasks another process of the session stored, and drops what it deleted', async ($, on) => {
@@ -269,7 +269,7 @@ test('a write keeps the tasks another process of the session stored, and drops w
       { id: '3', subject: 'Theirs', description: '', status: 'pending', blocks: [], blockedBy: [] },
     ],
   })
-  expect(said(await $.tool.call({ tool: CREATE, subject: 'Mine', description: '' }))).toBe('Created #4')
+  expect(said(await $.tool.call({ tool: CREATE, subject: 'Mine', description: '' }))).toBe(created(['4', 'Mine']))
   expect(said(await $.tool.call({ tool: LIST }))).toBe('#2 [pending] Two renamed\n#3 [pending] Theirs\n#4 [pending] Mine')
   // A task this process changes is its own version.
   await $.tool.call({ tool: UPDATE, taskId: '3', status: 'completed' })

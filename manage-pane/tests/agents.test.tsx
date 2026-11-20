@@ -603,3 +603,28 @@ test('an owner prefix that matches several agents is refused and changes nothing
   expect(await listOf($)).not.toContain('Renamed')
   expect(await listOf($)).not.toContain('owner')
 })
+
+test('a subagent’s REPL script is no call row of its own; the calls it makes are', async ($, on) => {
+  agentStub(on)
+  const repl = { inner: [] as string[], midCall: [] as string[] }
+  on('tool.call', { tool: 'REPL' }, async () => {
+    for (const command of repl.inner) await $.tool.call({ tool: 'Bash', command, agentId: 'a1' })
+    const ui = await mountPane($)
+    repl.midCall = (await ui.findAll({ type: 'Text', text: /^  [·▸] \S/ })).map(c => c.text)
+    await ui.unmount()
+    return { result: 'done' } as never
+  })
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'Look', description: 'd' })
+  await spawn($, '#1 Find')
+  await $.tool.call({ tool: 'REPL', code: 'x', agentId: 'a1' } as never)
+  expect(repl.midCall).toEqual([])
+  let ui = await mountPane($)
+  expect((await ui.findAll({ type: 'Text', text: /^  [·▸] \S/ })).map(c => c.text)).toEqual([])
+  await ui.unmount()
+  repl.inner = ['make']
+  await $.tool.call({ tool: 'REPL', code: 'x', agentId: 'a1' } as never)
+  expect(repl.midCall).toEqual(['  · Bash make'])
+  ui = await mountPane($)
+  expect((await ui.findAll({ type: 'Text', text: /^  [·▸] \S/ })).map(c => c.text)).toEqual(['  · Bash make'])
+})

@@ -60,6 +60,26 @@ export const paneTree = (
 export const withContext = (ran: ToolCallResult, line: string | undefined): ToolCallResult =>
   line === undefined || ran.deny !== undefined ? ran : ({ ...ran, context: [...(ran.context ?? []), line] } as ToolCallResult)
 
+// ---- a task call's time: its wait in the mod's queue counts against the hook's limit ----
+
+export const HOOK_LIMIT_MS = 10_000
+export const QUEUE_MARGIN_MS = 1000
+
+export const QUEUED_TOO_LONG = 'manage-pane: earlier task calls took too long, so this one did not run; the list is unchanged. Call it again.'
+
+type Budgeted = { signal?: { aborted?: boolean }; budget?: { remainingMs?: number } } | undefined
+
+// Too little left to start a body that would write; an engine with no budget never is.
+export const isOutOfTime = (next: Budgeted) =>
+  next?.signal?.aborted === true || (next?.budget?.remainingMs ?? Infinity) <= QUEUE_MARGIN_MS
+
+// A failed task call's answer: one the engine timed out before its body began did nothing and
+// may be called again; one that began (or carries no id) may already have written.
+export const failureText = (errorKind: unknown, toolUseId: string | undefined, started: ReadonlySet<string>) =>
+  errorKind === 'timeout' && toolUseId !== undefined && !started.has(toolUseId)
+    ? QUEUED_TOO_LONG
+    : 'manage-pane: the task tool failed; the list is unchanged.'
+
 export const remind = (agentId: string | undefined, tasks: readonly PaneTask[]) => {
   const line = agentId === undefined ? openText(tasks, false) : undefined
   if (line === undefined) return {}

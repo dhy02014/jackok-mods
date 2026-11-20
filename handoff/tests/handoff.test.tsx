@@ -85,6 +85,8 @@ const stub = (
   const exists = (p: string) => files.has(p) || isDir(p)
   const parentOf = (p: string) => p.slice(0, p.lastIndexOf('/'))
   const runs: string[][] = []
+  // Set `ms` above 0 and every rev-parse after it answers, failed, only that much later.
+  const gitHang = { ms: 0 }
   // A seeded card was last changed at noon of its filename's date; a write changes it now.
   const mtimes = new Map<string, number>()
   const mtimeOf = (p: string) => {
@@ -113,9 +115,6 @@ const stub = (
   })
   on('turn.complete', () => ({ text: '' }))
   on('classic.CwdChanged', () => ({}))
-  on('classic.UserPromptSubmit', () => ({}))
-  on('classic.PostToolUse', () => ({}))
-  on('classic.PostToolUseFailure', () => ({}))
   // The engine's verdict for a card call: 'ask' as a session with no rule for the tool gives;
   // 'throw' as an engine that cannot answer the check.
   const checks: unknown[] = []
@@ -176,6 +175,8 @@ const stub = (
     runs.push(argv)
     if (argv[0] === 'git') {
       if (o.isGitMissing === true) return { deny: 'spawn git ENOENT' }
+      // A git that hangs: the run is killed at its timeout and rejects, once the test advances that far.
+      if (gitHang.ms > 0 && argv.includes('rev-parse')) return clock.sleep(gitHang.ms).then(() => ({ deny: 'timed out' }))
       const out = git[e.init?.cwd ?? session.cwd]
       if (out === undefined) return done(128, 'fatal: not a git repository')
       const dirty = (e.init?.cwd ?? session.cwd) === MAIN ? (o.dirty ?? 0) : 0
@@ -215,7 +216,7 @@ const stub = (
     const { Text } = $.ui.resolve(e)
     return <Text>below</Text>
   })
-  return { files, session, runs, limits, dirs, registered, checks, clock, holdNextList }
+  return { files, session, runs, limits, dirs, registered, checks, clock, holdNextList, gitHang }
 }
 
 const said = (r: { result?: unknown; text?: string; deny?: string }) => String(r.deny ?? r.text ?? r.result)
@@ -613,7 +614,7 @@ test('an over-long title or next is denied on create and update, naming the fiel
   )
   expect([...files.keys()].filter(p => p.startsWith(`${CARDS}/`))).toEqual([])
 
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Short', next: 'Run the tests' }))).toBe('Created ~/repo/handoff/2026-10-11-short.md')
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Short', next: 'Run the tests' }))).toBe('Created /home/u/repo/handoff/2026-10-11-short.md\nslug: short')
   const before = files.get(`${CARDS}/2026-10-11-short.md`)
   expect(said(await $.tool.call({ tool: WRITE, slug: 'short', next: LONG_NEXT }))).toContain('card: next is')
   expect(said(await $.tool.call({ tool: WRITE, slug: 'short', title: '가'.repeat(21) }))).toContain('card: title is 42 cells wide')
@@ -628,9 +629,9 @@ test('a card already wider than the caps still lists, draws, and takes an update
   const ui = await $.ui.mount({ plugin: 'handoff', surface: 'terminal', ...BAND })
   expect(String((await ui.find({ key: `copy-${file}` }))?.props.label)).toMatch(/^#1 개인 mods/)
   // Fields left out, or repeated as the card has them, are not new text: no cap applies.
-  expect(said(await $.tool.call({ tool: WRITE, slug: 'long', status: 'hold' }))).toBe(`Updated ~/repo/handoff/${file}`)
+  expect(said(await $.tool.call({ tool: WRITE, slug: 'long', status: 'hold' }))).toBe(`Updated ${CARDS}/${file}\nslug: long`)
   expect(said(await $.tool.call({ tool: WRITE, slug: 'long', title: LONG_TITLE, next: LONG_NEXT, summary: 'x' }))).toBe(
-    `Updated ~/repo/handoff/${file}`,
+    `Updated ${CARDS}/${file}\nslug: long`,
   )
   expect(parseCard(file, files.get(`${CARDS}/${file}`)!)).toMatchObject({ next: LONG_NEXT, status: 'hold', summary: 'x' })
   // New text for that field is held to the cap.
@@ -642,7 +643,7 @@ test('write → update → list → close: the card on disk and the tool results
   await $.session.start({ cwd: WORKTREE, surface: 'terminal', isInteractive: true })
 
   expect(said(await $.tool.call({ tool: WRITE, title: 'Port the band', next: 'Write the tests', body: '## State\nhalf done' }))).toBe(
-    'Created ~/repo/handoff/2026-10-11-port-the-band.md',
+    'Created /home/u/repo/handoff/2026-10-11-port-the-band.md\nslug: port-the-band',
   )
   const path = `${CARDS}/2026-10-11-port-the-band.md`
   // From a worktree the card lands in the main checkout's handoff/.
@@ -653,7 +654,7 @@ test('write → update → list → close: the card on disk and the tool results
   expect(files.get(path)).not.toContain('workspaces')
   // A second card of the same title gets a slug of its own rather than overwriting.
   expect(said(await $.tool.call({ tool: WRITE, title: 'Port the band', next: 'x' }))).toBe(
-    'Created ~/repo/handoff/2026-10-11-port-the-band-2.md',
+    'Created /home/u/repo/handoff/2026-10-11-port-the-band-2.md\nslug: port-the-band-2',
   )
 
   expect(
@@ -667,7 +668,7 @@ test('write → update → list → close: the card on disk and the tool results
         doc: `${MAIN}/plans/x.md`,
       }),
     ),
-  ).toBe('Updated ~/repo/handoff/2026-10-11-port-the-band.md')
+  ).toBe('Updated /home/u/repo/handoff/2026-10-11-port-the-band.md\nslug: port-the-band')
   expect(parseCard('f', files.get(path)!)).toMatchObject({
     title: 'Port the band',
     next: 'Run the tests',
@@ -692,7 +693,7 @@ test('write → update → list → close: the card on disk and the tool results
   const before = files.get(path)
   // done moves the card as it is: the other fields of the call are ignored. Its doc was never written.
   expect(said(await $.tool.call({ tool: WRITE, slug: '2026-10-11-port-the-band.md', status: 'done', next: 'ignored' }))).toBe(
-    'Closed ~/repo/handoff/2026-10-11-port-the-band.md into ~/repo/handoff/closed/2026-10-11-port-the-band.md\n' +
+    'Closed /home/u/repo/handoff/2026-10-11-port-the-band.md into /home/u/repo/handoff/closed/2026-10-11-port-the-band.md\n' +
       'Left its doc ~/repo/plans/x.md in place: not found.',
   )
   expect(files.has(path)).toBe(false)
@@ -712,7 +713,7 @@ test('write → update → list → close: the card on disk and the tool results
   // Outside a repo the session's directory is the workspace.
   session.cwd = `${HOME}/elsewhere`
   expect(said(await $.tool.call({ tool: LIST }))).toBe('No handoff cards for this workspace.')
-  expect(said(await $.tool.call({ tool: WRITE, title: 't', next: 'n' }))).toBe('Created ~/elsewhere/handoff/2026-10-11-t.md')
+  expect(said(await $.tool.call({ tool: WRITE, title: 't', next: 'n' }))).toBe('Created /home/u/elsewhere/handoff/2026-10-11-t.md\nslug: t')
   expect(files.has(`${HOME}/elsewhere/handoff/2026-10-11-t.md`)).toBe(true)
 })
 
@@ -744,7 +745,7 @@ test('a card or doc whose name is taken in closed/ moves under the next free -2,
   })
   await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
   expect(said(await $.tool.call({ tool: WRITE, slug: 'moved', status: 'done' }))).toBe(
-    'Closed ~/repo/handoff/2026-10-01-moved.md into ~/repo/handoff/closed/2026-10-01-moved-2.md\n' +
+    'Closed /home/u/repo/handoff/2026-10-01-moved.md into /home/u/repo/handoff/closed/2026-10-01-moved-2.md\n' +
       'Moved its doc ~/repo/plans/mine.md to ~/repo/handoff/closed/mine-3.md',
   )
   expect(files.get(`${CLOSED}/2026-10-01-moved.md`)).toBe('OLD CARD')
@@ -817,7 +818,7 @@ test('done moves the doc into closed/ only from inside the repo and when no open
 
   // Only the file moves; its folder and siblings stay.
   expect(await close('moved')).toBe(
-    'Closed ~/repo/handoff/2026-10-01-moved.md into ~/repo/handoff/closed/2026-10-01-moved.md\n' +
+    'Closed /home/u/repo/handoff/2026-10-01-moved.md into /home/u/repo/handoff/closed/2026-10-01-moved.md\n' +
       'Moved its doc ~/repo/plans/mine.md to ~/repo/handoff/closed/mine.md',
   )
   expect(files.has(`${PLAN}/mine.md`)).toBe(false)
@@ -825,14 +826,14 @@ test('done moves the doc into closed/ only from inside the repo and when no open
   expect(files.get(`${PLAN}/sibling.md`)).toBe('SIBLING')
 
   expect(await close('outside')).toBe(
-    'Closed ~/repo/handoff/2026-10-02-outside.md into ~/repo/handoff/closed/2026-10-02-outside.md\n' +
+    'Closed /home/u/repo/handoff/2026-10-02-outside.md into /home/u/repo/handoff/closed/2026-10-02-outside.md\n' +
       'Left its doc ~/elsewhere/notes.md in place: outside this repo.',
   )
   expect(files.get(`${HOME}/elsewhere/notes.md`)).toBe('NOTES')
 
   // One card names the doc absolute, the other with `~`: the same file, kept for the open one.
   expect(await close('shared-a')).toBe(
-    'Closed ~/repo/handoff/2026-10-03-shared-a.md into ~/repo/handoff/closed/2026-10-03-shared-a.md\n' +
+    'Closed /home/u/repo/handoff/2026-10-03-shared-a.md into /home/u/repo/handoff/closed/2026-10-03-shared-a.md\n' +
       'Left its doc ~/repo/plans/shared.md in place: card 2026-10-04-shared-b.md still names it.',
   )
   expect(files.get(`${PLAN}/shared.md`)).toBe('SHARED')
@@ -841,7 +842,7 @@ test('done moves the doc into closed/ only from inside the repo and when no open
   expect(files.get(`${CLOSED}/shared.md`)).toBe('SHARED')
 
   expect(await close('gone')).toBe(
-    'Closed ~/repo/handoff/2026-10-05-gone.md into ~/repo/handoff/closed/2026-10-05-gone.md\n' +
+    'Closed /home/u/repo/handoff/2026-10-05-gone.md into /home/u/repo/handoff/closed/2026-10-05-gone.md\n' +
       'Left its doc ~/repo/plans/gone.md in place: not found.',
   )
   expect(await close('again')).toMatch(/\nLeft its doc ~\/repo\/handoff\/closed\/old\.md in place: it is inside handoff\/\.$/)
@@ -898,13 +899,13 @@ test('a closed card whose doc moved names the doc’s new path; a doc: line it c
   })
   await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
   expect(said(await $.tool.call({ tool: WRITE, slug: 'one', status: 'done' }))).toBe(
-    'Closed ~/repo/handoff/2026-10-01-one.md into ~/repo/handoff/closed/2026-10-01-one.md\n' +
+    'Closed /home/u/repo/handoff/2026-10-01-one.md into /home/u/repo/handoff/closed/2026-10-01-one.md\n' +
       'Moved its doc ~/repo/plans/one.md to ~/repo/handoff/closed/one.md',
   )
   // Only the doc: line changed.
   expect(files.get(`${CLOSED}/2026-10-01-one.md`)).toBe(card({ title: 'One' }).replace('---\n', '---\ndoc: ~/repo/handoff/closed/one.md\n') + 'Body\n')
   expect(said(await $.tool.call({ tool: WRITE, slug: 'two', status: 'done' }))).toBe(
-    'Closed ~/repo/handoff/2026-10-02-two.md into ~/repo/handoff/closed/2026-10-02-two.md\n' +
+    'Closed /home/u/repo/handoff/2026-10-02-two.md into /home/u/repo/handoff/closed/2026-10-02-two.md\n' +
       'Moved its doc ~/repo/plans/two.md to ~/repo/handoff/closed/two.md\n' +
       'The closed card ~/repo/handoff/closed/2026-10-02-two.md still names its old doc path: its doc: line could not be edited.',
   )
@@ -936,7 +937,7 @@ test('create never writes over a file in handoff/: an unreadable one is skipped,
     unlisted: [`${CARDS}/2026-10-11-hidden.md`],
   })
   await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Port', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-port-2.md')
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Port', next: 'n' }))).toBe('Created /home/u/repo/handoff/2026-10-11-port-2.md\nslug: port-2')
   expect(files.get(BROKEN)).toBe('not a card')
   // `port` names the unreadable file, by slug or by filename: refused, never created over it.
   for (const slug of ['port', '2026-10-11-port.md']) {
@@ -944,7 +945,7 @@ test('create never writes over a file in handoff/: an unreadable one is skipped,
       'card: ~/repo/handoff/2026-10-11-port.md exists but is not a readable card; fix or rename it.',
     )
   }
-  expect(said(await $.tool.call({ tool: WRITE, slug: 'port-2', next: 'm' }))).toBe('Updated ~/repo/handoff/2026-10-11-port-2.md')
+  expect(said(await $.tool.call({ tool: WRITE, slug: 'port-2', next: 'm' }))).toBe('Updated /home/u/repo/handoff/2026-10-11-port-2.md\nslug: port-2')
   expect(files.get(BROKEN)).toBe('not a card')
   expect(said(await $.tool.call({ tool: LIST }))).toBe(`[open] Port — ${CARDS}/2026-10-11-port-2.md\n[unreadable] ${BROKEN}`)
   // A file the listing missed is still not written over.
@@ -961,7 +962,7 @@ test('git before 2.31 echoes --path-format: rootOf refuses it and the toplevel s
   const { files, runs } = stub(on, { cwd: WORKTREE, isGitOld: true })
   await $.session.start({ cwd: WORKTREE, surface: 'terminal', isInteractive: true })
   // The worktree's own toplevel, not a folder named after the echoed flag.
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Old', next: 'n' }))).toBe('Created ~/repo/.claude/worktrees/feat/handoff/2026-10-11-old.md')
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Old', next: 'n' }))).toBe('Created /home/u/repo/.claude/worktrees/feat/handoff/2026-10-11-old.md\nslug: old')
   expect(files.has(`${WORKTREE}/handoff/2026-10-11-old.md`)).toBe(true)
   expect(runs).toContainEqual(['git', '--no-optional-locks', 'rev-parse', '--show-toplevel'])
 })
@@ -997,14 +998,14 @@ test('native Windows: USERPROFILE for home, cmd for mkdir and move, the card and
   })
   await $.session.start({ cwd, surface: 'terminal', isInteractive: true })
   expect(said(await $.tool.call({ tool: WRITE, title: 'Port', next: 'Test it', doc: 'C:\\Users\\u\\repo\\plans\\plan.md' }))).toBe(
-    'Created ~/repo/handoff/2026-10-11-port.md',
+    'Created C:/Users/u/repo/handoff/2026-10-11-port.md\nslug: port',
   )
   expect(files.has('/Users/u/repo/handoff/2026-10-11-port.md')).toBe(true)
   expect(said(await $.tool.call({ tool: LIST }))).toBe(
     '[open] Port — C:/Users/u/repo/handoff/2026-10-11-port.md (doc: C:/Users/u/repo/plans/plan.md)',
   )
   expect(said(await $.tool.call({ tool: WRITE, slug: 'port', status: 'done' }))).toBe(
-    'Closed ~/repo/handoff/2026-10-11-port.md into ~/repo/handoff/closed/2026-10-11-port.md\n' +
+    'Closed C:/Users/u/repo/handoff/2026-10-11-port.md into C:/Users/u/repo/handoff/closed/2026-10-11-port.md\n' +
       'Moved its doc ~/repo/plans/plan.md to ~/repo/handoff/closed/plan.md',
   )
   expect(files.has('/Users/u/repo/handoff/2026-10-11-port.md')).toBe(false)
@@ -1026,19 +1027,19 @@ test('without git the session directory is the workspace: cards in <cwd>/handoff
   const ui = await $.ui.mount({ plugin: 'handoff', surface: 'terminal', ...BAND })
   expect(await ui.find({ type: 'Text', text: '#1 Seen — next of Seen' })).toBeDefined()
 
-  expect(said(await $.tool.call({ tool: WRITE, title: 'No git', next: 'n' }))).toBe('Created ~/plain/handoff/2026-10-11-no-git.md')
+  expect(said(await $.tool.call({ tool: WRITE, title: 'No git', next: 'n' }))).toBe('Created /home/u/plain/handoff/2026-10-11-no-git.md\nslug: no-git')
   expect(said(await $.tool.call({ tool: LIST }))).toBe(
     `[open] No git — ${PLAIN}/handoff/2026-10-11-no-git.md\n[open] Seen — ${PLAIN}/handoff/2026-10-10-seen.md`,
   )
   expect(said(await $.tool.call({ tool: WRITE, slug: 'no-git', status: 'done' }))).toBe(
-    'Closed ~/plain/handoff/2026-10-11-no-git.md into ~/plain/handoff/closed/2026-10-11-no-git.md',
+    'Closed /home/u/plain/handoff/2026-10-11-no-git.md into /home/u/plain/handoff/closed/2026-10-11-no-git.md',
   )
   expect(files.has(`${PLAIN}/handoff/closed/2026-10-11-no-git.md`)).toBe(true)
   // Nothing vouches for a doc without git: it stays.
   files.set(`${PLAIN}/notes.md`, 'NOTES')
   await $.tool.call({ tool: WRITE, title: 'With doc', next: 'n', doc: '~/plain/notes.md' })
   expect(said(await $.tool.call({ tool: WRITE, slug: 'with-doc', status: 'done' }))).toBe(
-    'Closed ~/plain/handoff/2026-10-11-with-doc.md into ~/plain/handoff/closed/2026-10-11-with-doc.md\n' +
+    'Closed /home/u/plain/handoff/2026-10-11-with-doc.md into /home/u/plain/handoff/closed/2026-10-11-with-doc.md\n' +
       'Left its doc ~/plain/notes.md in place: no git repo here to confirm it is tracked.',
   )
   expect(files.get(`${PLAIN}/notes.md`)).toBe('NOTES')
@@ -1167,11 +1168,11 @@ const NOT_IGNORED =
 test('the first card in a handoff/ git does not ignore says so, once; .gitignore and .git are never written', async ($, on) => {
   const { files, runs } = stub(on, { isCardDirUnignored: true })
   await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Local', next: 'n' }))).toBe(`Created ~/repo/handoff/2026-10-11-local.md\n${NOT_IGNORED}`)
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Local', next: 'n' }))).toBe(`Created ${CARDS}/2026-10-11-local.md\nslug: local\n${NOT_IGNORED}`)
   expect(runs).toContainEqual(['git', '--no-optional-locks', 'check-ignore', '-q', '--', `${CARDS}/2026-10-11-local.md`])
   // The folder now has an entry: a second create, an update or a close says nothing more.
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Second', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-second.md')
-  expect(said(await $.tool.call({ tool: WRITE, slug: 'local', next: 'm' }))).toBe('Updated ~/repo/handoff/2026-10-11-local.md')
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Second', next: 'n' }))).toBe('Created /home/u/repo/handoff/2026-10-11-second.md\nslug: second')
+  expect(said(await $.tool.call({ tool: WRITE, slug: 'local', next: 'm' }))).toBe('Updated /home/u/repo/handoff/2026-10-11-local.md\nslug: local')
   expect(runs.filter(r => r.includes('check-ignore'))).toHaveLength(1)
   expect([...files.keys()].filter(p => p.endsWith('.gitignore') || p.includes('/.git/'))).toEqual([])
 })
@@ -1180,9 +1181,9 @@ test('a card created where git ignores handoff/, or outside git, gets no note', 
   const PLAIN = `${HOME}/plain`
   const { runs, session } = stub(on)
   await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Ignored', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-ignored.md')
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Ignored', next: 'n' }))).toBe('Created /home/u/repo/handoff/2026-10-11-ignored.md\nslug: ignored')
   session.cwd = PLAIN
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Plain', next: 'n' }))).toBe('Created ~/plain/handoff/2026-10-11-plain.md')
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Plain', next: 'n' }))).toBe('Created /home/u/plain/handoff/2026-10-11-plain.md\nslug: plain')
   expect(runs.filter(r => r.includes('check-ignore'))).toHaveLength(1)
 })
 
@@ -1198,35 +1199,88 @@ test('outside git, the home folder or a filesystem root is no place for a card; 
   expect([isNoProject('C:\\', 'C:/Users/u'), isNoProject('c:/users/u', 'C:/Users/u'), isNoProject('C:/Users/u/p', 'C:/Users/u')]).toEqual([true, true, false])
 })
 
+// A script may run several card calls at once (Promise.all): titles that slug alike each get their own file.
+test('two creates at once whose titles slug alike write two cards, neither over the other', async ($, on) => {
+  const { files } = stub(on)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  const made = await Promise.all([
+    $.tool.call({ tool: WRITE, title: '첫 카드', next: 'n1' }),
+    $.tool.call({ tool: WRITE, title: '둘째 카드', next: 'n2' }),
+  ])
+  expect(made.map(said)).toEqual([
+    `Created ${CARDS}/2026-10-11-handoff.md\nslug: handoff`,
+    `Created ${CARDS}/2026-10-11-handoff-2.md\nslug: handoff-2`,
+  ])
+  expect([`${CARDS}/2026-10-11-handoff.md`, `${CARDS}/2026-10-11-handoff-2.md`].map(p => parseCard('f', files.get(p) ?? '')?.title)).toEqual(['첫 카드', '둘째 카드'])
+})
+
+test('a card call that waited out its time limit behind an earlier one writes nothing', async ($, on) => {
+  const { files, clock, holdNextList } = stub(on)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  // The first call's folder listing answers only after 11 s, past the second call's 10 s limit.
+  holdNextList(11_000)
+  const first = $.tool.call({ tool: WRITE, title: 'Slow', next: 'n1' })
+  const second = $.tool.call({ tool: WRITE, title: 'Queued', next: 'n2' })
+  await clock.settle()
+  await clock.advance(11_000)
+  const [a, b] = await Promise.all([first, second])
+  expect(said(a)).toBe(`Created ${CARDS}/2026-10-11-slow.md\nslug: slow`)
+  expect(said(b)).toBe('card: earlier card calls took too long, so this one did not run; no card changed. Call it again.')
+  expect([...files.keys()].filter(p => p.startsWith(`${CARDS}/`))).toEqual([`${CARDS}/2026-10-11-slow.md`])
+})
+
+const QUEUED = 'card: earlier card calls took too long, so this one did not run; no card changed. Call it again.'
+
+// The engine's own 10 s hook limit runs on real time, so this test waits it out. Time the
+// running call spends inside `$` calls does not count, so it alone is not timed out.
+test('calls the engine times out while queued are told to call again and never write later', { timeoutMs: 20_000 }, async ($, on) => {
+  const { files, clock, holdNextList } = stub(on)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  holdNextList(60_000)
+  const slow = $.tool.call({ tool: WRITE, tool_use_id: 's1', title: 'Slow', next: 'n' } as never)
+  const queued = [
+    $.tool.call({ tool: WRITE, tool_use_id: 'q2', title: 'Queued', next: 'n' } as never),
+    $.tool.call({ tool: WRITE, tool_use_id: 'q3', title: 'Later', next: 'n' } as never),
+  ]
+  await clock.settle()
+  expect((await Promise.all(queued)).map(said)).toEqual([QUEUED, QUEUED])
+  await clock.advance(60_000)
+  expect(said(await slow)).toBe(`Created ${CARDS}/2026-10-11-slow.md\nslug: slow`)
+  await clock.settle()
+  expect([...files.keys()].filter(p => p.startsWith(`${CARDS}/`))).toEqual([`${CARDS}/2026-10-11-slow.md`])
+})
+
+const GIT_SLOW = 'card: git did not answer within 5 s; no card written. Call it again.'
+
+test('git that answers only after its 5 s limit writes no card in the session directory; create, update and close say so', async ($, on) => {
+  const { files, clock, gitHang } = stub(on, { cwd: WORKTREE, files: { [`${CARDS}/2026-10-10-seen.md`]: card({ title: 'Seen' }) } })
+  await $.session.start({ cwd: WORKTREE, surface: 'terminal', isInteractive: true })
+  const before = new Map(files)
+  gitHang.ms = 5000
+  for (const call of [{ title: 'New', next: 'n' }, { slug: 'seen', next: 'm' }, { slug: 'seen', status: 'done' }]) {
+    const answer = $.tool.call({ tool: WRITE, ...call })
+    await clock.settle()
+    await clock.advance(5000)
+    expect(said(await answer)).toBe(GIT_SLOW)
+  }
+  expect(files).toEqual(before)
+  // A git that fails at once (no repo) still makes the session directory the workspace.
+  gitHang.ms = 0
+  expect(said(await $.tool.call({ tool: WRITE, title: 'New', next: 'n' }))).toBe(`Created ${CARDS}/2026-10-11-new.md\nslug: new`)
+})
+
+test('a slug two cards share comes back as the file stem, which names only this one', async ($, on) => {
+  stub(on, {
+    files: { [`${CARDS}/2026-10-09-dup.md`]: card({ title: 'Older' }), [`${CARDS}/2026-10-10-dup.md`]: card({ title: 'Newer' }) },
+  })
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  expect(said(await $.tool.call({ tool: WRITE, slug: '2026-10-10-dup', next: 'm' }))).toBe(`Updated ${CARDS}/2026-10-10-dup.md\nslug: 2026-10-10-dup`)
+})
+
 test('a git repo at home still takes a card', async ($, on) => {
   stub(on, { cwd: HOME, git: { [HOME]: `${HOME}/.git\n${HOME}` } })
   await $.session.start({ cwd: HOME, surface: 'terminal', isInteractive: true })
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Dots', next: 'n' }))).toBe('Created ~/handoff/2026-10-11-dots.md')
-})
-
-const hookBase = { session_id: 'sid-1', transcript_path: '/t.jsonl', cwd: MAIN }
-
-const PLAN_REFUSAL =
-  'card: plan mode was on at the last prompt or tool event, so no card was written, updated or closed. If plan mode has since been turned off, retry after the next tool call or prompt.'
-
-test('plan mode, as the latest prompt or tool event reports it, refuses create, update and close; a subagent’s mode is not kept', async ($, on) => {
-  const { files } = stub(on, { files: { [`${CARDS}/2026-10-10-seen.md`]: card({ title: 'Seen' }) } })
-  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
-  await $.classic.UserPromptSubmit({ ...hookBase, permission_mode: 'plan', hook_event_name: 'UserPromptSubmit', prompt: 'p' } as never)
-  const before = new Map(files)
-  for (const call of [{ title: 'New', next: 'n' }, { slug: 'seen', next: 'm' }, { slug: 'seen', status: 'done' }]) {
-    expect(said(await $.tool.call({ tool: WRITE, ...call }))).toBe(PLAN_REFUSAL)
-  }
-  expect(files).toEqual(before)
-  await $.classic.PostToolUse({ ...hookBase, agent_id: 'a1', permission_mode: 'default', hook_event_name: 'PostToolUse' } as never)
-  expect(said(await $.tool.call({ tool: WRITE, title: 'New', next: 'n' }))).toBe(PLAN_REFUSAL)
-  await $.classic.PostToolUse({ ...hookBase, permission_mode: 'acceptEdits', hook_event_name: 'PostToolUse' } as never)
-  expect(said(await $.tool.call({ tool: WRITE, title: 'New', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-new.md')
-  // A failed tool reports the mode too.
-  await $.classic.PostToolUseFailure({ ...hookBase, permission_mode: 'plan', hook_event_name: 'PostToolUseFailure' } as never)
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Later', next: 'n' }))).toBe(PLAN_REFUSAL)
-  await $.classic.PostToolUseFailure({ ...hookBase, permission_mode: 'default', hook_event_name: 'PostToolUseFailure' } as never)
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Later', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-later.md')
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Dots', next: 'n' }))).toBe('Created /home/u/handoff/2026-10-11-dots.md\nslug: dots')
 })
 
 test('a deny verdict for card refuses create, update and close; nothing is written', async ($, on) => {
@@ -1246,13 +1300,13 @@ test('a deny verdict for card refuses create, update and close; nothing is writt
 test('an allow verdict writes the card', async ($, on) => {
   stub(on, { check: 'allow' })
   await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Allowed', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-allowed.md')
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Allowed', next: 'n' }))).toBe('Created /home/u/repo/handoff/2026-10-11-allowed.md\nslug: allowed')
 })
 
 test('fails open: a permission check the engine cannot answer refuses nothing, and the card is written', async ($, on) => {
   const { checks } = stub(on, { check: 'throw' })
   await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
-  expect(said(await $.tool.call({ tool: WRITE, title: 'Unchecked', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-unchecked.md')
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Unchecked', next: 'n' }))).toBe('Created /home/u/repo/handoff/2026-10-11-unchecked.md\nslug: unchecked')
   expect(checks).toHaveLength(1)
 })
 
@@ -1267,12 +1321,6 @@ test('a turn’s background refresh that ends after a newer one leaves the newer
   expect(said(await $.tool.call({ tool: LIST }))).toMatch(/Later/)
   await clock.advance(1000)
   expect(await ui.find({ type: 'Text', text: /Later/ })).toBeDefined()
-})
-
-test('fails open: with no permission mode ever reported (no classic event reached the mod), card writes', async ($, on) => {
-  stub(on)
-  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
-  expect(said(await $.tool.call({ tool: WRITE, title: 'No mode', next: 'n' }))).toBe('Created ~/repo/handoff/2026-10-11-no-mode.md')
 })
 
 test('the card spec asks for a card only when the user wants one, never on the model’s own initiative', () => {
@@ -1304,7 +1352,7 @@ test('card and list results read one card per line, mark first, as the call left
     return seen[seen.length - 1]
   }
   const made = await $.tool.call({ tool: WRITE, tool_use_id: 'w1', title: '새 카드', next: '다음 단계', status: 'hold' } as never)
-  expect(said(made)).toBe('Created ~/repo/handoff/2026-10-11-handoff.md')
+  expect(said(made)).toBe('Created /home/u/repo/handoff/2026-10-11-handoff.md\nslug: handoff')
   expect(await result(WRITE, 'w1', 'Created …')).toBe('◌ 새 카드 (new)\n→ 다음 단계')
   // The shape the output came in is kept.
   expect(await result(WRITE, 'w1', [{ type: 'text', text: 'x' }])).toEqual([{ type: 'text', text: '◌ 새 카드 (new)\n→ 다음 단계' }])
@@ -1320,4 +1368,10 @@ test('card and list results read one card per line, mark first, as the call left
   expect(await result(WRITE, 'w1', 'boom', true)).toBe('boom')
   expect(await result('Bash', 'w1', 'ls')).toBe('ls')
   expect(await result(WRITE, 'unknown', 'as is')).toBe('as is')
+  // A call, and its result row, that carry no tool_use_id keep nothing and draw the engine's text.
+  await $.tool.call({ tool: WRITE, title: 'No id', next: 'n' })
+  const props = { tool: WRITE, output: 'engine text', isErrored: false }
+  const ui = await $.ui.mount({ plugin: 'handoff', surface: 'terminal', component: 'ToolResult', requestId: 'no-id', props } as never)
+  await ui.unmount()
+  expect(seen[seen.length - 1]).toBe('engine text')
 })

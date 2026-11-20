@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import { START, stub, said, done, instructionStub, reminder, opening, afterRead, reply, MEASURE, mountPrompt, prompt, rows, sizes } from './helpers'
 
 test('each file shows its body size at the right, the newest copy counting, and a total under them', async ($, on) => {
@@ -133,4 +133,73 @@ test('a /clear empties the instruction list, its bank and its last scan', async 
   convo.messages = [opening('/home/u/.claude/CLAUDE.md')]
   await $.session.measure(MEASURE)
   expect(await rows(ui)).toEqual(['~/.claude', 'CLAUDE.md'])
+})
+
+test('main-loop calls that end before the scan share one; a REPL script scans once, after it returns', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  stub(on)
+  const seen = { scans: 0, duringScript: -1 }
+  on('session.messages', () => {
+    seen.scans++
+    return { value: [] } as never
+  })
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
+  const settle = () => new Promise(r => setTimeout(r, 0))
+  const bash = async () => {
+    for (const command of ['a', 'b', 'c']) await $.tool.call({ tool: 'Bash', command })
+  }
+  on('tool.call', { tool: 'REPL' }, async () => {
+    await bash()
+    await clock.advance(1)
+    await settle()
+    seen.duringScript = seen.scans
+    return { result: 'done' } as never
+  })
+  await $.session.start(START)
+  await clock.advance(1)
+  await settle()
+  const base = seen.scans
+  await bash()
+  await clock.advance(1)
+  await settle()
+  expect(seen.scans - base).toBe(1)
+  await $.tool.call({ tool: 'REPL', code: 'x' } as never)
+  // Nothing was scanned while the script ran; its return queued one scan.
+  expect(seen.duringScript - base).toBe(1)
+  await clock.advance(1)
+  await settle()
+  expect(seen.scans - base).toBe(2)
+})
+
+test('a script still running in the background does not hold back the scan of a script that ends', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  stub(on)
+  const seen = { scans: 0 }
+  on('session.messages', () => {
+    seen.scans++
+    return { value: [] } as never
+  })
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
+  const settle = () => new Promise(r => setTimeout(r, 0))
+  const gate: { open?: () => void } = {}
+  on('tool.call', { tool: 'REPL' }, async (_, e) => {
+    if ((e as { code?: string }).code === 'background') await new Promise<void>(r => (gate.open = r))
+    else await $.tool.call({ tool: 'Bash', command: 'a' })
+    return { result: 'done' } as never
+  })
+  await $.session.start(START)
+  await clock.advance(1)
+  await settle()
+  const base = seen.scans
+  const background = $.tool.call({ tool: 'REPL', code: 'background' } as never)
+  await settle()
+  await $.tool.call({ tool: 'REPL', code: 'short' } as never)
+  await clock.advance(1)
+  await settle()
+  expect(seen.scans - base).toBe(1)
+  gate.open?.()
+  await background
+  await clock.advance(1)
+  await settle()
+  expect(seen.scans - base).toBe(2)
 })

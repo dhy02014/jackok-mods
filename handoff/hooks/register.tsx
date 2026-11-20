@@ -65,9 +65,6 @@ const warnedFor = atom({ plugin: 'handoff', key: 'warnedFor' } as const, null)
 const toolRows = atom({ plugin: 'handoff', key: 'toolRows' } as const, {}, { shape: 'v1' })
 const ROWS_KEPT = 200
 
-// The main loop's latest permission mode as a classic event reported it; null before any.
-const permissionMode = atom({ plugin: 'handoff', key: 'permissionMode' } as const, null)
-
 // Uncommitted changes in the workspace: zero without git or outside a repo. The repo's own
 // card folder is left out (`:/` is the whole repo from any subfolder), so cards never count.
 const dirtyCount = async ($: EngineInterface) => {
@@ -99,6 +96,9 @@ const shownDir = (root: string, home: string | undefined) => {
   return home === undefined ? dir : tildify(dir, home)
 }
 
+// The card folder in a tool result: absolute, as `list` gives it, so the model can Read it as given.
+const absDir = (root: string) => slashed(`${root}/${DIR}`)
+
 // A folder (handoff/closed/) is skipped: only the open cards are listed. `names` is every
 // entry in handoff/, folders and unreadable files included, so a new card never takes one;
 // `unreadable` is each `.md` file that does not read as a card, so `list` can name it.
@@ -118,13 +118,28 @@ const loadAll = async ($: EngineInterface, root: string) => {
   return { cards, names, unreadable }
 }
 
+// cmd's `move /-y` prompts on a collision, and a queued card call waits on the one before it
+// (see `serially`): no run outlives this.
+const RUN_LIMIT = { timeoutMs: 5000 }
+
 // The workspace is the repo's main checkout, so a git worktree of it reads
 // and writes the cards of the checkout it came from, unpushed ones included. Git before
 // 2.31 has no --path-format: its toplevel stands, a worktree's own. Without git, or outside
 // a repo, the session's directory is the workspace. `isGit`: git resolved the root.
+// `isTimedOut`: a git run failed only after RUN_LIMIT, so whether this is a repo is unknown
+// and the session's directory may be the wrong workspace; a clock that fails never sets it.
 const where = async ($: EngineInterface, cwd?: string) => {
   const at = slashed(cwd ?? (await $.session.cwd()))
-  const git = (args: string[]) => $.process.run(['git', '--no-optional-locks', ...args], { cwd: at }).catch(() => undefined)
+  let isTimedOut = false
+  const git = async (args: string[]) => {
+    const t0 = await $.clock.now().catch(() => undefined)
+    const r = await $.process.run(['git', '--no-optional-locks', ...args], { cwd: at, ...RUN_LIMIT }).catch(() => undefined)
+    if (r?.exitCode !== 0 && t0 !== undefined) {
+      const t1 = await $.clock.now().catch(() => t0)
+      if (t1 - t0 >= RUN_LIMIT.timeoutMs) isTimedOut = true
+    }
+    return r
+  }
   const r = await git(['rev-parse', '--path-format=absolute', '--git-common-dir', '--show-toplevel'])
   let root = r?.exitCode === 0 ? rootOf(r.stdout) : undefined
   if (r?.exitCode === 0 && root === undefined) {
@@ -132,8 +147,10 @@ const where = async ($: EngineInterface, cwd?: string) => {
     const line = top?.exitCode === 0 ? top.stdout.trim() : ''
     root = line.split('\n').length === 1 && isAbsolute(line) ? line : undefined
   }
-  return { root: root ?? at, cwd: at, isGit: root !== undefined }
+  return { root: root ?? at, cwd: at, isGit: root !== undefined, isTimedOut }
 }
+
+const GIT_SLOW = `card: git did not answer within ${RUN_LIMIT.timeoutMs / 1000} s; no card written. Call it again.`
 
 // Only the newest refresh writes the view: an unawaited one (turn.complete) that ends after a
 // later one would put older cards back. Each caller still gets the cards it read.
@@ -168,9 +185,6 @@ const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
 const parentOf = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf('/'))) || '/'
 
 const UNSAFE_FOR_CMD = 'the path holds a character cmd would run as a command'
-
-// mkdir and mv never wait on input, but cmd's `move /-y` prompts on a collision: no run outlives this.
-const RUN_LIMIT = { timeoutMs: 5000 }
 
 // Moves one file into `dir`, creating the folder when missing, under a name no file there
 // has yet. Never replaces or deletes anything: on any failure the file stays where it was.
@@ -217,7 +231,7 @@ const retireDoc = async (
   if (entry === undefined) return left('its folder could not be listed')
   if (entry.kind === 'dir') return left('it is a folder')
   if (!at.isGit) return left('no git repo here to confirm it is tracked')
-  const tracked = await $.process.run(['git', '--no-optional-locks', 'ls-files', '--error-unmatch', '--', plan.from], { cwd: root }).catch(() => undefined)
+  const tracked = await $.process.run(['git', '--no-optional-locks', 'ls-files', '--error-unmatch', '--', plan.from], { cwd: root, ...RUN_LIMIT }).catch(() => undefined)
   if (tracked?.exitCode !== 0) return left('git does not track it in this repo')
   const moved = await moveInto($, plan.from, `${root}/${CLOSED_DIR}`)
   if ('left' in moved) return left(moved.left)
@@ -229,22 +243,29 @@ const retireDoc = async (
 }
 
 // A mod tool is answered ahead of the permission check and does not prompt, so `card` asks
-// for the verdict itself: plan mode, or a `deny` from the rules or a tool.check hook, refuses
-// a write; an `ask` verdict proceeds. Both fail open: a mode never reported (no classic event
-// reaches this mod) and a check the engine cannot answer refuse nothing.
+// for the verdict itself: a `deny` from the rules or a tool.check hook refuses a write; an
+// `ask` verdict proceeds. Fails open: a check the engine cannot answer refuses nothing.
 const refusal = async ($: EngineInterface, input: Record<string, unknown>) => {
-  if ((await read($, permissionMode).catch(() => null)) === 'plan') {
-    return 'card: plan mode was on at the last prompt or tool event, so no card was written, updated or closed. If plan mode has since been turned off, retry after the next tool call or prompt.'
-  }
   const verdict = await $.tool.check({ tool: CARD, input }).catch(() => undefined)
   if (verdict?.decision !== 'deny') return undefined
   return `card: a permission rule or hook denies this tool${verdict.reason ? ` (${verdict.reason})` : ''}; no card changed.`
 }
 
-const noteMode = async ($: EngineInterface, e: { agent_id?: string; permission_mode?: string }) => {
-  const mode = e.permission_mode
-  if (e.agent_id !== undefined || typeof mode !== 'string') return
-  if ((await read($, permissionMode).catch(() => null)) !== mode) await update($, permissionMode, () => mode).catch(ignore)
+// Card calls run one at a time: a script's concurrent calls would otherwise list the folder
+// together and pick, then write, the same new file. A queued call's wait counts against its
+// hook's time limit, so the body checks what is left before it starts.
+const HOOK_LIMIT_MS = 10_000
+const QUEUE_MARGIN_MS = 1000
+const QUEUED = 'card: earlier card calls took too long, so this one did not run; no card changed. Call it again.'
+// The tool_use_ids whose body has begun: a call the engine timed out before its body began
+// is answered QUEUED, one that began (or carries no id) the generic `failed`, since it may
+// already have written.
+const begun = new Set<string>()
+let cardQueue: Promise<unknown> = Promise.resolve()
+const serially = <T,>(run: () => Promise<T>): Promise<T> => {
+  const turn = cardQueue.then(run)
+  cardQueue = turn.catch(ignore)
+  return turn
 }
 
 // The line a folder's first card gains when git would list the card folder as untracked:
@@ -266,6 +287,7 @@ const retire = async ($: EngineInterface, slug: unknown, toolUseId: string | und
   const home = await homeOf($)
   const shown = (p: string) => (home === undefined ? p : tildify(p, home))
   const at = await where($)
+  if (at.isTimedOut) return { deny: GIT_SLOW }
   const { root } = at
   const { cards: all } = await loadAll($, root)
   const card = findCard(all, key)
@@ -277,7 +299,7 @@ const retire = async ($: EngineInterface, slug: unknown, toolUseId: string | und
   await refresh($).catch(ignore)
   await markTouched($)
   await remember($, toolUseId, closedLines(card.title, t.rowClosed))
-  const closed = `Closed ${cardPath(shownDir(root, home), card)} into ${shown(moved.to)}`
+  const closed = `Closed ${cardPath(absDir(root), card)} into ${slashed(moved.to)}`
   return { result: docLine === undefined ? closed : `${closed}\n${docLine}` }
 }
 
@@ -324,25 +346,6 @@ export const register: Register = (on, options) => {
     await refresh($, e.new_cwd).catch(ignore)
     return done
   }).catch(($, e, next) => next(e))
-
-  // The mode the person last set, as the main loop's prompt and tool events report it: a
-  // switch mid-turn reaches `card` at the next such event. A subagent's own mode is not kept.
-  on('classic.UserPromptSubmit', async ($, e, next) => {
-    const done = await next(e)
-    await noteMode($, e)
-    return done
-  }).catch(($, e, next) => next(e))
-  on('classic.PostToolUse', async ($, e, next) => {
-    const done = await next(e)
-    await noteMode($, e)
-    return done
-  }).catch(($, e, next) => next(e))
-  on('classic.PostToolUseFailure', async ($, e, next) => {
-    const done = await next(e)
-    await noteMode($, e)
-    return done
-  }).catch(($, e, next) => next(e))
-  // No classic.PreToolUse: the engine raises every classic event but that one, which rides tool.call.
 
   // Another session may have written or closed a card meanwhile. Left running after the
   // turn ends: its git probe never holds the turn, and its view write redraws the band.
@@ -391,100 +394,117 @@ export const register: Register = (on, options) => {
 
   // ---- the tools ----
 
-  on('tool.call', { tool: CARD }, async ($, e) => {
-    const FIELDS = ['title', 'next', 'summary', 'status', 'body', 'doc', 'slug'] as const
-    for (const k of FIELDS) {
-      if (e[k] !== undefined && typeof e[k] !== 'string') return { deny: `card: ${k} must be a string.` }
-    }
-    const refused = await refusal($, Object.fromEntries(FIELDS.filter(k => e[k] !== undefined).map(k => [k, e[k]])))
-    if (refused !== undefined) return { deny: refused }
-    if (e.status === 'done') return retire($, e.slug, e.tool_use_id)
-    if (e.status !== undefined && asStatus(e.status) === undefined) {
-      return { deny: `Unknown status "${String(e.status)}": use open, hold or done.` }
-    }
-    if (typeof e.doc === 'string' && e.doc.trim() !== '' && !isPath(e.doc.trim())) {
-      return { deny: 'card: doc must be a ~-prefixed (or absolute) path.' }
-    }
-    const home = await homeOf($)
-    if (home === undefined) return { deny: 'handoff: HOME/USERPROFILE is unset; no card written.' }
-    const { root, isGit } = await where($)
-    const doc = typeof e.doc === 'string' ? (e.doc.trim() === '' ? null : tildify(expandHome(e.doc.trim(), home), home)) : undefined
-    const body = typeof e.body === 'string' ? e.body.trim() : undefined
-    const summary = typeof e.summary === 'string' ? oneLine(e.summary) : undefined
-    const { cards: all, names, unreadable } = await loadAll($, root)
-    const key = str(e.slug)
-    const date = today(await $.clock.now())
-    const found = key === undefined ? undefined : findCard(all, key)
-    // Only new text is held to the caps: an update that leaves a field out, or repeats what
-    // the card already says, never fails on a card written before them.
-    for (const k of ['title', 'next'] as const) {
-      const v = str(e[k])
-      const why = v === undefined || v === found?.[k] ? undefined : tooWide(k, v)
-      if (why !== undefined) return { deny: why }
-    }
-    let card: HandoffCard
-    if (found !== undefined) {
-      const { doc: oldDoc, summary: oldSummary, ...rest } = found
-      const keptDoc = doc === undefined ? oldDoc : (doc ?? undefined)
-      const keptSummary = summary === undefined ? oldSummary : summary || undefined
-      card = {
-        ...rest,
-        title: str(e.title) ?? found.title,
-        next: str(e.next) ?? found.next,
-        status: asStatus(e.status) ?? found.status,
-        ...(keptSummary !== undefined ? { summary: keptSummary } : {}),
-        ...(keptDoc !== undefined ? { doc: keptDoc } : {}),
-        body: body ?? found.body,
+  on('tool.call', { tool: CARD }, async ($, e, next) => {
+    const startedAt = await $.clock.now().catch(() => undefined)
+    return serially(async () => {
+      // Timed out (or about to) while queued: the engine answers such a call with `failed`, so
+      // nothing may be written now. The clock check also covers an engine with no budget.
+      const waited = startedAt === undefined ? 0 : (await $.clock.now()) - startedAt
+      const limit = (next?.budget?.ms ?? HOOK_LIMIT_MS) - QUEUE_MARGIN_MS
+      if (next?.signal?.aborted === true || (next?.budget?.remainingMs ?? 1) <= 0 || waited >= limit) {
+        return { deny: QUEUED }
       }
-    } else {
-      if (!isGit && isNoProject(root, home)) {
-        return { deny: `card: ${tildify(root, home)} is the home folder or a filesystem root, not a project; start the session in a project folder to write a card.` }
+      if (e.tool_use_id !== undefined) begun.add(e.tool_use_id)
+      const FIELDS = ['title', 'next', 'summary', 'status', 'body', 'doc', 'slug'] as const
+      for (const k of FIELDS) {
+        if (e[k] !== undefined && typeof e[k] !== 'string') return { deny: `card: ${k} must be a string.` }
       }
-      const title = str(e.title)
-      const next = str(e.next)
-      if (title === undefined || next === undefined) {
-        const none = key !== undefined ? `No card "${key}" to update; ` : ''
-        return { deny: `${none}card needs a title and next to create a card.` }
+      const refused = await refusal($, Object.fromEntries(FIELDS.filter(k => e[k] !== undefined).map(k => [k, e[k]])))
+      if (refused !== undefined) return { deny: refused }
+      if (e.status === 'done') return retire($, e.slug, e.tool_use_id)
+      if (e.status !== undefined && asStatus(e.status) === undefined) {
+        return { deny: `Unknown status "${String(e.status)}": use open, hold or done.` }
       }
-      if (key !== undefined && !isSlug(slugOf(key))) {
-        return { deny: `card: "${key}" is no slug (lowercase letters, digits and dashes).` }
+      if (typeof e.doc === 'string' && e.doc.trim() !== '' && !isPath(e.doc.trim())) {
+        return { deny: 'card: doc must be a ~-prefixed (or absolute) path.' }
       }
-      const file = key !== undefined ? `${date}-${slugOf(key)}.md` : freshFile(date, slugify(title), all, names)
-      if (key !== undefined) {
-        // The file the key names, or would name, is there but no card reads from it: never written over.
-        const low = (s: string) => s.toLowerCase()
-        const broken = unreadable.find(n => [low(key), low(`${key}.md`), low(file)].includes(low(n)) || slugOf(n) === slugOf(key))
-        if (broken !== undefined) {
-          return { deny: `card: ${shownDir(root, home)}/${broken} exists but is not a readable card; fix or rename it.` }
+      const home = await homeOf($)
+      if (home === undefined) return { deny: 'handoff: HOME/USERPROFILE is unset; no card written.' }
+      const { root, isGit, isTimedOut } = await where($)
+      if (isTimedOut) return { deny: GIT_SLOW }
+      const doc = typeof e.doc === 'string' ? (e.doc.trim() === '' ? null : tildify(expandHome(e.doc.trim(), home), home)) : undefined
+      const body = typeof e.body === 'string' ? e.body.trim() : undefined
+      const summary = typeof e.summary === 'string' ? oneLine(e.summary) : undefined
+      const { cards: all, names, unreadable } = await loadAll($, root)
+      const key = str(e.slug)
+      const date = today(await $.clock.now())
+      const found = key === undefined ? undefined : findCard(all, key)
+      // Only new text is held to the caps: an update that leaves a field out, or repeats what
+      // the card already says, never fails on a card written before them.
+      for (const k of ['title', 'next'] as const) {
+        const v = str(e[k])
+        const why = v === undefined || v === found?.[k] ? undefined : tooWide(k, v)
+        if (why !== undefined) return { deny: why }
+      }
+      let card: HandoffCard
+      if (found !== undefined) {
+        const { doc: oldDoc, summary: oldSummary, ...rest } = found
+        const keptDoc = doc === undefined ? oldDoc : (doc ?? undefined)
+        const keptSummary = summary === undefined ? oldSummary : summary || undefined
+        card = {
+          ...rest,
+          title: str(e.title) ?? found.title,
+          next: str(e.next) ?? found.next,
+          status: asStatus(e.status) ?? found.status,
+          ...(keptSummary !== undefined ? { summary: keptSummary } : {}),
+          ...(keptDoc !== undefined ? { doc: keptDoc } : {}),
+          body: body ?? found.body,
         }
-        if (names.some(n => low(n) === low(file))) {
-          return { deny: `card: ${shownDir(root, home)}/${file} already exists; update it by its own slug.` }
+      } else {
+        if (!isGit && isNoProject(root, home)) {
+          return { deny: `card: ${tildify(root, home)} is the home folder or a filesystem root, not a project; start the session in a project folder to write a card.` }
+        }
+        const title = str(e.title)
+        const nextStep = str(e.next)
+        if (title === undefined || nextStep === undefined) {
+          const none = key !== undefined ? `No card "${key}" to update; ` : ''
+          return { deny: `${none}card needs a title and next to create a card.` }
+        }
+        if (key !== undefined && !isSlug(slugOf(key))) {
+          return { deny: `card: "${key}" is no slug (lowercase letters, digits and dashes).` }
+        }
+        const file = key !== undefined ? `${date}-${slugOf(key)}.md` : freshFile(date, slugify(title), all, names)
+        if (key !== undefined) {
+          // The file the key names, or would name, is there but no card reads from it: never written over.
+          const low = (s: string) => s.toLowerCase()
+          const broken = unreadable.find(n => [low(key), low(`${key}.md`), low(file)].includes(low(n)) || slugOf(n) === slugOf(key))
+          if (broken !== undefined) {
+            return { deny: `card: ${shownDir(root, home)}/${broken} exists but is not a readable card; fix or rename it.` }
+          }
+          if (names.some(n => low(n) === low(file))) {
+            return { deny: `card: ${shownDir(root, home)}/${file} already exists; update it by its own slug.` }
+          }
+        }
+        card = {
+          file,
+          title,
+          status: asStatus(e.status) ?? 'open',
+          next: nextStep,
+          ...(summary ? { summary } : {}),
+          ...(doc !== undefined && doc !== null ? { doc } : {}),
+          body: body ?? '',
         }
       }
-      card = {
-        file,
-        title,
-        status: asStatus(e.status) ?? 'open',
-        next,
-        ...(summary ? { summary } : {}),
-        ...(doc !== undefined && doc !== null ? { doc } : {}),
-        body: body ?? '',
+      // Written in place: `$.fs.write` creates the folder, and a card is small. A new card never
+      // replaces a file the listing missed (written meanwhile, or a listing that failed).
+      const path = `${root}/${DIR}/${card.file}`
+      if (found === undefined && (await exists($, path))) {
+        return { deny: `card: ${cardPath(shownDir(root, home), card)} already exists; no card written.` }
       }
-    }
-    // Written in place: `$.fs.write` creates the folder, and a card is small. A new card never
-    // replaces a file the listing missed (written meanwhile, or a listing that failed).
-    const path = `${root}/${DIR}/${card.file}`
-    if (found === undefined && (await exists($, path))) {
-      return { deny: `card: ${cardPath(shownDir(root, home), card)} already exists; no card written.` }
-    }
-    await $.fs.write(path, cardText(card))
-    const note = found === undefined && isGit && names.length === 0 ? await unignoredNote($, root, path, shownDir(root, home)) : undefined
-    await refresh($).catch(ignore)
-    await markTouched($)
-    await remember($, e.tool_use_id, cardLines(card, found !== undefined ? t.rowUpdated : t.rowCreated))
-    const done = `${found !== undefined ? 'Updated' : 'Created'} ${cardPath(shownDir(root, home), card)}`
-    return { result: note === undefined ? done : `${done}\n${note}` }
-  }).catch(failed)
+      await $.fs.write(path, cardText(card))
+      const note = found === undefined && isGit && names.length === 0 ? await unignoredNote($, root, path, shownDir(root, home)) : undefined
+      await refresh($).catch(ignore)
+      await markTouched($)
+      await remember($, e.tool_use_id, cardLines(card, found !== undefined ? t.rowUpdated : t.rowCreated))
+      // A slug another card shares would reach whichever card lists first: name this one by its file.
+      const slug = slugOf(card.file)
+      const handle = all.some(c => c.file !== card.file && slugOf(c.file) === slug) ? card.file.replace(/\.md$/, '') : slug
+      const done = `${found !== undefined ? 'Updated' : 'Created'} ${cardPath(absDir(root), card)}\nslug: ${handle}`
+      return { result: note === undefined ? done : `${done}\n${note}` }
+    }).finally(() => {
+      if (e.tool_use_id !== undefined) begun.delete(e.tool_use_id)
+    })
+  }).catch(($, e, next) => (next?.error?.kind === 'timeout' && e.tool_use_id !== undefined && !begun.has(e.tool_use_id) ? { deny: QUEUED } : failed()))
 
   on('tool.call', { tool: LIST }, async ($, e) => {
     const { root, cards, unreadable } = await refresh($)

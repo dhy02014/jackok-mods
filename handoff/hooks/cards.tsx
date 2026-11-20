@@ -39,7 +39,7 @@ export const TOOLS = [
     name: 'card',
     isDeferred: false,
     description:
-      'Create, update or close a handoff card (work left for a later session) in this repo\'s handoff/ folder (the session\'s directory outside git). Call it only when the user asks for a handoff or to save work for a later session; give `title` and `next` (both required) to create, `slug` to update, `slug` with `status: done` to close. A long body may live in a doc referenced by `doc` instead.',
+      'Create, update or close a handoff card (work left for a later session) in this repo\'s handoff/ folder (the session\'s directory outside git). Call it only when the user asks for a handoff or to save work for a later session; give `title` and `next` (both required) to create, `slug` to update, `slug` with `status: done` to close. Put a long body in a doc named by `doc`.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -50,11 +50,11 @@ export const TOOLS = [
           type: 'string',
           enum: ['open', 'hold', 'done'],
           description:
-            'open: a later session can start `next` with no one\'s input. hold: `next` waits on a user decision or an outside event — name what it waits on in `next`. done: all the card\'s work is finished; needs `slug`, ignores other fields, moves the card into handoff/closed/, off the band, with its doc when that is in this repo and no other card names it; nothing is deleted (a finished step is an edit, not done). Default open.',
+            'open: a later session can start `next` with no one\'s input. hold: `next` waits on a user decision or an outside event — name what it waits on in `next`. done: all the card\'s work is finished; ignores other fields, moves the card into handoff/closed/ with its doc when that is in this repo and no other card names it; nothing is deleted (a finished step is an edit, not done). Default open.',
         },
         body: { type: 'string', description: 'Markdown, in order: current state (done, uncommitted), decisions and why, next steps in order, gotchas that cost time, how to verify.' },
         doc: { type: 'string', description: '~-prefixed path of a detailed doc; "" clears it.' },
-        slug: { type: 'string', description: 'Card to update, by slug or filename; omit to create one.' },
+        slug: { type: 'string', description: 'An existing slug updates or closes that card; a new one (a-z, 0-9, -) names the card being created.' },
       },
     },
   },

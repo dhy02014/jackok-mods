@@ -16,13 +16,13 @@ import {
   taskMarkOf,
   touch,
 } from './agents'
-import { flag, newTask, patchOf } from './input'
+import { flag, idOf, newTask, patchOf } from './input'
 import { bankIfShrunk, diskBody, instructionsTree, mergeLoads, scanLoads } from './instructions'
-import { paneTree, remind, withContext } from './pane'
+import { failureText, HOOK_LIMIT_MS, isOutOfTime, paneTree, QUEUED_TOO_LONG, remind, withContext } from './pane'
 import { slashed } from './platform'
 import { EN } from './strings'
 import type { AppliedMany } from './tasks'
-import { createLines, summary, updateLines, withText } from './toolrow'
+import { createdLines, createLines, summary, updateLines, withText } from './toolrow'
 import {
   applyPatches,
   asStatus,
@@ -31,6 +31,7 @@ import {
   EMPTY,
   handbackText,
   listText,
+  openText,
   own,
   ownersIn,
   str,
@@ -62,6 +63,11 @@ const CREATE = 'mcp__manage-pane__task_create'
 const UPDATE = 'mcp__manage-pane__task_update'
 const LIST = 'mcp__manage-pane__task_list'
 const AGENT = 'Agent'
+// Code mode's tools: a REPL script calls other tools, each through tool.call under its own name.
+const REPL = 'REPL'
+const POLL = 'Poll'
+// The Poll statuses of work that has ended.
+const FINISHED = new Set(['completed', 'failed', 'killed', 'stopped'])
 
 const board = atom({ plugin: 'manage-pane', key: 'board' } as const, EMPTY, { shape: 'v2' })
 const blink = atom({ plugin: 'manage-pane', key: 'blink' } as const, false)
@@ -233,7 +239,47 @@ const restore = async ($: EngineInterface) => {
   await update($, board, (b: PaneBoard) => (b.sessionId === sid ? b : { sessionId: sid, lastId: stored?.lastId ?? 0, tasks: stored?.tasks ?? [] }))
 }
 
-const failed = () => ({ deny: 'manage-pane: the task tool failed; the list is unchanged.' })
+// The tool_use_ids whose task body has begun, for `failureText`.
+const started = new Set<string>()
+
+// A task hook's error handler: a call the engine timed out while it waited in the queue is told to call again.
+const failedOrQueued = (_: unknown, e: { tool_use_id?: string }, next?: { error?: { kind?: unknown } }) => ({
+  deny: failureText(next?.error?.kind, e.tool_use_id, started),
+})
+
+// Task calls and claims run one at a time: calls a script fires side by side would each
+// persist a board read before the other's write and put it back over it. The queue waits on
+// one run for at most a hook's limit, so a run that never settles cannot hold every later call.
+let taskQueue: Promise<unknown> = Promise.resolve()
+const serial = <T,>($: EngineInterface, body: () => Promise<T>): Promise<T> => {
+  const run = taskQueue.then(body)
+  let timer: { cancel: () => void } | undefined
+  const stalled = new Promise<void>(resolve => {
+    try {
+      timer = $.clock.after(HOOK_LIMIT_MS, resolve)
+    } catch {
+      // No clock: the queue waits on the run alone.
+    }
+  })
+  const settled = run.then(
+    () => timer?.cancel(),
+    () => timer?.cancel(),
+  )
+  taskQueue = Promise.race([settled, stalled]).catch(ignore)
+  return run
+}
+
+// A task call's body: refused when its time ran out while queued (the engine answers that
+// call with the error handler while a late body would still write), marked begun otherwise.
+const taskBody = <T,>(next: Parameters<typeof isOutOfTime>[0], id: string | undefined, body: () => Promise<T>) => async () => {
+  if (isOutOfTime(next)) return { deny: QUEUED_TOO_LONG }
+  if (id !== undefined) started.add(id)
+  try {
+    return await body()
+  } finally {
+    if (id !== undefined) started.delete(id)
+  }
+}
 
 // ---- instruction files ----
 
@@ -242,6 +288,19 @@ const failed = () => ({ deny: 'manage-pane: the task tool failed; the list is un
 // One at a time: two scans reading the same last scan would bank a shrink twice.
 let scanning: Promise<void> = Promise.resolve()
 const scanInstructions = ($: EngineInterface) => (scanning = scanning.catch(ignore).then(() => scanOnce($)))
+
+// A main-loop call's scan, on the clock (off the call's path); calls that end before it runs
+// share it. None for a call inside a running REPL script; a script's own end always queues one,
+// so a background script still running does not hold back the scans of those that end.
+let scanQueued = false
+const queueScan = ($: EngineInterface, isScriptEnd = false) => {
+  if (scanQueued || (scripts > 0 && !isScriptEnd)) return
+  scanQueued = true
+  $.clock.after(1, () => {
+    scanQueued = false
+    void scanInstructions($).catch(ignore)
+  })
+}
 
 // Each loaded file is read back so its size ends where the file does; one that cannot be read
 // is sized by its span in the conversation.
@@ -263,12 +322,47 @@ const scanOnce = async ($: EngineInterface) => {
 
 const currentTasks = async ($: EngineInterface) => own(await read($, board), await sessionId($)).tasks
 
+// Main-loop REPL scripts running. Per-call lists read stale by a script's end, so the script's
+// own result also carries one current reminder. Per-call reminders are kept as well, because
+// whether a REPL result's `context` reaches the model is unverified (check live: create a task
+// inside a script and see whether the model reads the script result's "Open tasks").
+let scripts = 0
+const held = { isReminded: false, handedBack: new Set<string>() }
+
+const remindNow = (agentId: string | undefined, tasks: readonly PaneTask[]) => {
+  if (agentId === undefined && scripts > 0) held.isReminded = true
+  return remind(agentId, tasks)
+}
+
 // A foreground Agent call resolves when the subagent has handed back; a background
 // launch (`async_launched`) is not one, its report comes as a task notification.
 const agentHandback = async ($: EngineInterface, ran: ToolCallResult) => {
   const r = ran.result as { status?: unknown; agentId?: unknown } | undefined
   if (r?.status !== 'completed' || typeof r.agentId !== 'string') return ran
+  if (scripts > 0) held.handedBack.add(r.agentId)
   return withContext(ran, handbackText(await currentTasks($).catch(() => []), [r.agentId]))
+}
+
+// What a script's held reminders become on its result: the hand-backs with the open list, or
+// the open list alone; nothing when no task call or hand-back ran in it.
+const heldText = async ($: EngineInterface) => {
+  const ids = [...held.handedBack]
+  const isReminded = held.isReminded
+  held.handedBack.clear()
+  held.isReminded = false
+  if (ids.length === 0 && !isReminded) return undefined
+  const tasks = await currentTasks($).catch(() => [])
+  return ids.length > 0 ? handbackText(tasks, ids) : openText(tasks, false)
+}
+
+// Text a tool result carries, whatever its shape, for an owner id to be looked for in.
+const resultText = (v: unknown) => {
+  if (typeof v === 'string') return v
+  try {
+    return JSON.stringify(v) ?? ''
+  } catch {
+    return ''
+  }
 }
 
 // ---- subagents' isolation ----
@@ -321,7 +415,9 @@ const isolatedCalls = new Set<string>()
 // write a task_update would make. A missing or completed task is left alone: a stale
 // number must not reopen finished work, and a task another running agent works stays its.
 // True when the task is open, claimed or not: the agent is drawn under it either way.
-const claim = async ($: EngineInterface, taskId: string, agentId: string) => {
+const claim = ($: EngineInterface, taskId: string, agentId: string) => serial($, () => claimNow($, taskId, agentId))
+
+const claimNow = async ($: EngineInterface, taskId: string, agentId: string) => {
   await restore($).catch(ignore)
   const sid = await sessionId($)
   const all = await read($, agents)
@@ -460,14 +556,15 @@ export const register: Register = (on, options) => {
       return agentHandback($, ran)
     }
     if (agentId === undefined) {
-      // A rule a read pulled in rides the next request: a scan per call keeps the list near
-      // live and banks close to an auto-compaction mid-turn. On the clock: off the call's path.
+      // A rule a read pulled in rides the next request: a scan after a call keeps the list near
+      // live and banks close to an auto-compaction mid-turn.
       const ran = await next(e)
-      $.clock.after(1, () => void scanInstructions($).catch(ignore))
+      queueScan($, e.tool === REPL)
       return ran
     }
-    // Only subagents' calls, and only agents this load saw spawn.
-    if ((await read($, agents))[agentId] === undefined) return next(e)
+    // Only subagents' calls, and only agents this load saw spawn. A REPL script is no row of
+    // its own (its input names no target); the calls it makes are.
+    if (e.tool === REPL || (await read($, agents))[agentId] === undefined) return next(e)
     const now = await $.clock.now()
     // Calls of one agent may run side by side: each is marked done by its own sequence number.
     let seq = 0
@@ -485,6 +582,37 @@ export const register: Register = (on, options) => {
       touch(all, agentId, a => ({ ...a, recent: a.recent.map(c => (c.seq === seq ? { ...c, isCalling: false } : c)) })),
     )
     return ran
+  })
+
+  // Inside the hook above, so its scan is queued once the script has ended.
+  on('tool.call', { tool: REPL }, async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    scripts++
+    try {
+      const ran = await next(e)
+      return withContext(ran, await heldText($))
+    } catch (err) {
+      // A script that throws leaves nothing held for the next one; another still running keeps its own.
+      if (scripts === 1) {
+        held.isReminded = false
+        held.handedBack.clear()
+      }
+      throw err
+    } finally {
+      scripts--
+    }
+  })
+
+  // A background agent's report read back by Poll: the hand-back reminder when an open task's
+  // owner is named in a result whose status says it ended. Nothing for any other shape.
+  on('tool.call', { tool: POLL }, async ($, e, next) => {
+    const ran = await next(e)
+    if (e.agentId !== undefined || ran.deny !== undefined) return ran
+    const status = (ran.result as { status?: unknown } | null | undefined)?.status
+    if (typeof status !== 'string' || !FINISHED.has(status)) return ran
+    const tasks = await currentTasks($).catch(() => [])
+    const owners = ownersIn(tasks, resultText(ran.result))
+    return owners.length === 0 ? ran : withContext(ran, handbackText(tasks, owners))
   })
 
   // A message to a finished subagent resumes it from its transcript (SessionSendAddress):
@@ -530,7 +658,7 @@ export const register: Register = (on, options) => {
   // A subagent's call lands in the same list: the CLI keeps one list per session too.
   // One task by the top-level fields, or several as `tasks`, numbered in order in one
   // board write: the first bad entry denies the call and nothing is created.
-  on('tool.call', { tool: CREATE }, async ($, e) => {
+  on('tool.call', { tool: CREATE }, async ($, e, next) => serial($, taskBody(next, e.tool_use_id, async () => {
     const entries: unknown[] = Array.isArray(e.tasks) ? e.tasks : [e]
     if (entries.length === 0) return { deny: 'task_create needs a subject, or a non-empty tasks list.' }
     const items: { subject: string; fields: Record<string, unknown> }[] = []
@@ -564,21 +692,22 @@ export const register: Register = (on, options) => {
     await syncBlink($).catch(ignore)
     follow($, made.filter(x => x.status === 'in_progress').at(-1)?.id)
     await remember($, e.tool_use_id, createLines(made))
+    // JSON, so a REPL script reads the ids it made; the transcript row shows `remember`'s lines.
     return {
-      result: `Created #${made.map(x => x.id).join(', #')}`,
-      ...remind(e.agentId, written.tasks),
+      result: JSON.stringify({ created: made.map(x => ({ id: x.id, subject: x.subject })) }),
+      ...remindNow(e.agentId, written.tasks),
     }
-  }).catch(failed)
+  }))).catch(failedOrQueued)
 
   // One task by the top-level fields, or several as `updates`, applied in order in one
   // board write: the first bad entry denies the call and nothing changes.
-  on('tool.call', { tool: UPDATE }, async ($, e) => {
+  on('tool.call', { tool: UPDATE }, async ($, e, next) => serial($, taskBody(next, e.tool_use_id, async () => {
     const entries: unknown[] = Array.isArray(e.updates) ? e.updates : [e]
     if (entries.length === 0) return { deny: 'task_update needs a taskId, or a non-empty updates list.' }
     const patches = []
     for (const raw of entries) {
       const u = (raw ?? {}) as Record<string, unknown>
-      const id = str(u.taskId)
+      const id = idOf(u.taskId)
       if (id === undefined) return { deny: 'task_update needs a taskId in every update.' }
       if (u.status !== undefined && u.status !== 'deleted' && asStatus(u.status) === undefined) {
         return { deny: `Unknown status "${String(u.status)}": use pending, in_progress, completed or deleted.` }
@@ -623,16 +752,16 @@ export const register: Register = (on, options) => {
       result: done.results
         .map(r => `Updated task #${r.id} ${r.fields.length > 0 ? r.fields.join(', ') : '(no changes)'}`)
         .join('\n'),
-      ...remind(e.agentId, written.tasks),
+      ...remindNow(e.agentId, written.tasks),
     }
-  }).catch(failed)
+  }))).catch(failedOrQueued)
 
   // No reminder here: the result already is the whole list, statuses and owners included.
-  on('tool.call', { tool: LIST }, async $ => {
+  on('tool.call', { tool: LIST }, async ($, e, next) => serial($, taskBody(next, e.tool_use_id, async () => {
     await restore($).catch(ignore)
     const b = own(await read($, board), await sessionId($))
     return { result: listText(b.tasks) }
-  }).catch(failed)
+  }))).catch(failedOrQueued)
 
   // A task_create / task_update call's row keeps the engine's header, spinner and error
   // colours; only its input shows as a count. Another tool, or an input with nothing
@@ -643,11 +772,11 @@ export const register: Register = (on, options) => {
   })
 
   // The result block under those rows lists one task per line, `#N subject`, from the lines the
-  // call left behind. An errored result, another tool, or a call with no lines kept (after /clear
-  // or a resume) is drawn as it came.
+  // call left behind, or for task_create from its JSON result. An errored result, another tool,
+  // or an update with no lines kept (after /clear or a resume) is drawn as it came.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     if (e.props.isErrored || (e.props.tool !== CREATE && e.props.tool !== UPDATE)) return next(e)
-    const lines = (await read($, toolRows))[e.props.tool_use_id]
+    const lines = (await read($, toolRows))[e.props.tool_use_id] ?? (e.props.tool === CREATE ? createdLines(e.props.output) : undefined)
     const output = lines === undefined ? undefined : withText(e.props.output, lines.join('\n'))
     return next(output === undefined ? e : { ...e, props: { ...e.props, output } })
   })

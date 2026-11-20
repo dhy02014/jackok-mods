@@ -1,3 +1,4 @@
+import { idOf } from './input'
 import { MARK, str } from './tasks'
 
 // What this mod's task_create / task_update rows show in the transcript, from plain values
@@ -30,7 +31,7 @@ export const summary = (tool: string, input: unknown): Record<string, number> | 
   const n = isCreate
     ? items(input, 'tasks').filter(i => str(i.subject) !== undefined).length
     : tool.endsWith('__task_update')
-      ? items(input, 'updates').filter(i => str(i.taskId) !== undefined).length
+      ? items(input, 'updates').filter(i => idOf(i.taskId) !== undefined).length
       : 0
   return n === 0 ? undefined : { [isCreate ? 'tasks' : 'updates']: n }
 }
@@ -61,4 +62,24 @@ export const withText = (output: unknown, text: string): unknown => {
     return content === undefined ? undefined : { ...output, content }
   }
   return undefined
+}
+
+const textIn = (output: unknown): string | undefined => {
+  if (typeof output === 'string') return output
+  if (Array.isArray(output)) return output.length > 0 && output.every(isBlock) ? output.map(b => b.text).join('') : undefined
+  if (typeof output === 'object' && output !== null && 'content' in output) return textIn((output as Item).content)
+  return undefined
+}
+
+// task_create's lines rebuilt from its own JSON result, for a call whose kept lines are gone
+// (a resume, or a call whose row id differs from its call's). Undefined for any other text.
+export const createdLines = (output: unknown): string[] | undefined => {
+  try {
+    const created = (JSON.parse(textIn(output) ?? '') as { created?: unknown }).created
+    if (!Array.isArray(created) || created.length === 0) return undefined
+    const ok = created.every(x => typeof x?.id === 'string' && typeof x?.subject === 'string')
+    return ok ? createLines(created as { id: string; subject: string }[]) : undefined
+  } catch {
+    return undefined
+  }
 }

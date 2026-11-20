@@ -47,8 +47,6 @@ declare module 'claude-code' {
       touchedFor: string | null
       /** The session id whose /clear or /exit was already held once. */
       warnedFor: string | null
-      /** The main loop's latest `permission_mode` from a classic prompt or tool event; `plan` refuses card writes. Null before any. */
-      permissionMode: string | null
       /** The result lines of each card and list call, by tool_use_id (the newest 200), drawn under its transcript row. */
       toolRows: Shaped<Record<string, string[]>>
     }
