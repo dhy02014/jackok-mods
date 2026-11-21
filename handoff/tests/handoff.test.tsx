@@ -1327,6 +1327,9 @@ test('the card spec asks for a card only when the user wants one, never on the m
   const card = TOOLS.find(t => t.name === 'card')!.description
   expect(card).toMatch(/only when the user asks for a handoff or to save work for a later session/)
   expect(card).not.toMatch(/session end|when work remains/)
+  // A doc is named, never one the model creates on its own.
+  expect(card).not.toMatch(/Put a long body/)
+  expect(card).toMatch(/an existing doc via `doc`/)
 })
 
 test('the model-facing specs stay small, language suffix included, and name no workflow', () => {

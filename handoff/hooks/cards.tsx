@@ -39,7 +39,7 @@ export const TOOLS = [
     name: 'card',
     isDeferred: false,
     description:
-      'Create, update or close a handoff card (work left for a later session) in this repo\'s handoff/ folder (the session\'s directory outside git). Call it only when the user asks for a handoff or to save work for a later session; give `title` and `next` (both required) to create, `slug` to update, `slug` with `status: done` to close. Put a long body in a doc named by `doc`.',
+      'Create, update or close a handoff card (work left for a later session) in this repo\'s handoff/ folder (the session\'s directory outside git). Call it only when the user asks for a handoff or to save work for a later session; give `title` and `next` (both required) to create, `slug` to update, `slug` with `status: done` to close. A long body goes in an existing doc via `doc`.',
     inputSchema: {
       type: 'object',
       properties: {
