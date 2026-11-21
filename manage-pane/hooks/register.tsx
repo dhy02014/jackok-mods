@@ -11,7 +11,9 @@ import {
   restart,
   runOf,
   targetOf,
+  liveOwners,
   otherAgentsTree,
+  soleLiveTask,
   taskAgentsTree,
   taskMarkOf,
   touch,
@@ -518,6 +520,14 @@ export const register: Register = (on, options) => {
       const { taskId } = taskMarkOf(e.description)
       if (taskId !== undefined && (await claim($, taskId, id).catch(() => false))) {
         await update($, agents, all => touch(all, id, a => ({ ...a, taskId })))
+      } else if (taskId === undefined) {
+        // No mark: drawn under the one task in progress, without claiming it.
+        // Behind queued task calls, on the restored list, so a start or a resume just before counts.
+        const sole = await serial($, async () => {
+          await restore($).catch(ignore)
+          return soleLiveTask(own(await read($, board), await sessionId($)).tasks)
+        }).catch(() => undefined)
+        if (sole !== undefined) await update($, agents, all => touch(all, id, a => ({ ...a, taskId: sole })))
       }
     }
     return ran
@@ -697,7 +707,7 @@ export const register: Register = (on, options) => {
     // JSON, so a REPL script reads the ids it made; the transcript row shows `remember`'s lines.
     return {
       result: JSON.stringify({ created: made.map(x => ({ id: x.id, subject: x.subject })) }),
-      ...remind(e.agentId, written.tasks),
+      ...remind(e.agentId, written.tasks, true),
     }
   }))).catch(failedOrQueued)
 
@@ -810,7 +820,7 @@ export const register: Register = (on, options) => {
         ? instructionsTree(draw, t, loads)
         : (
             <draw.Box flexDirection="column">
-              {tasksTree(draw, t, list, isLit, x => taskAgentsTree(draw, t, x, all, columns), isHidden)}
+              {tasksTree(draw, t, list, isLit, x => taskAgentsTree(draw, t, x, all, columns, liveOwners(list, isHidden)), isHidden)}
               {otherAgentsTree(draw, t, list, all, columns, isHidden)}
             </draw.Box>
           ),

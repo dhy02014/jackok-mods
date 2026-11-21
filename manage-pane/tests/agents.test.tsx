@@ -628,3 +628,43 @@ test('a subagent’s REPL script is no call row of its own; the calls it makes a
   ui = await mountPane($)
   expect((await ui.findAll({ type: 'Text', text: /^  [·▸] \S/ })).map(c => c.text)).toEqual(['  · Bash make'])
 })
+
+
+test('an Agent with no #N while exactly one task is in progress is drawn under that task, unclaimed', async ($, on) => {
+  agentStub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'Review' , status: 'in_progress' }, { subject: 'Later' }] })
+  await spawn($, 'Review the diff')
+  await spawn($, 'Second reviewer')
+  const ui = await mountPane($)
+  expect(await ui.find({ key: 'pane-owned:a1' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-owned:a2' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeUndefined()
+  // Drawn, not claimed: the task keeps no owner.
+  expect(said(await $.tool.call({ tool: LIST }))).not.toMatch(/owner/)
+})
+
+test('an Agent with no #N while two tasks are in progress, or none, is drawn under Other', async ($, on) => {
+  agentStub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'A' }, { subject: 'B' }] })
+  await spawn($, 'No task live')
+  await $.tool.call({ tool: UPDATE, updates: [{ taskId: '1', status: 'in_progress' }, { taskId: '2', status: 'in_progress' }] })
+  await spawn($, 'Two tasks live')
+  const ui = await mountPane($)
+  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-agent:a1' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-agent:a2' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-owned:a2' })).toBeUndefined()
+})
+
+test('an unmarked agent drawn under the in-progress task, then made owner of another, is drawn once', async ($, on) => {
+  agentStub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'Impl', status: 'in_progress' }, { subject: 'Review' }] })
+  await spawn($, 'Reviewer')
+  await $.tool.call({ tool: UPDATE, taskId: '2', owner: 'a1', status: 'in_progress' })
+  const ui = await mountPane($)
+  expect(await ui.findAll({ key: 'pane-owned:a1' })).toHaveLength(1)
+  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeUndefined()
+})

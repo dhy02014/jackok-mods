@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { failureText, HOOK_LIMIT_MS, isOutOfTime, QUEUE_MARGIN_MS, QUEUED_TOO_LONG } from '../hooks/pane'
+import { AGENT_HINT } from '../hooks/pane'
 import { START, CREATE, UPDATE, LIST, stub, mountPane, agentStub, done, contextOf, AGENT_DONE, spawn, instructionStub, reminder, opening, prompt, rows, said } from './helpers'
 
 test('a main-loop task call carries the open tasks as context; none once all are completed', async ($, on) => {
@@ -9,6 +10,8 @@ test('a main-loop task call carries the open tasks as context; none once all are
   expect(contextOf(await $.tool.call({ tool: CREATE, subject: 'Second', description: 'd' }))).toEqual([
     // No subjects: the model just wrote them and they are in context.
     'Open tasks: #1 [pending], #2 [pending]',
+    // task_create teaches the #N mark where every tool mode reads it.
+    AGENT_HINT,
   ])
   expect(
     contextOf(await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'abcdef0123456789' })),
@@ -288,8 +291,8 @@ test('a REPL script’s task calls keep their reminders; the script’s result c
   }
   expect(contextOf(await $.tool.call({ tool: 'REPL', code: 'x' } as never))).toEqual([])
   expect(inner).toEqual([
-    ['Open tasks: #1 [pending]'],
-    ['Open tasks: #1 [pending], #2 [pending]'],
+    ['Open tasks: #1 [pending]', AGENT_HINT],
+    ['Open tasks: #1 [pending], #2 [pending]', AGENT_HINT],
     ['Open tasks: #1 [in_progress], #2 [pending]'],
   ])
   expect(contextOf(await $.tool.call({ tool: UPDATE, taskId: '2', status: 'in_progress' }))).toEqual([
@@ -301,7 +304,7 @@ test('parallel task calls each carry their own reminder', async ($, on) => {
   stub(on)
   await $.session.start(START)
   const made = await Promise.all([$.tool.call({ tool: CREATE, subject: 'One' }), $.tool.call({ tool: CREATE, subject: 'Two' })])
-  expect(made.map(contextOf).every(c => c.length === 1 && c[0]!.startsWith('Open tasks: #1 [pending]'))).toBe(true)
+  expect(made.map(contextOf).every(c => c.length === 2 && c[0]!.startsWith('Open tasks: #1 [pending]') && c[1] === AGENT_HINT)).toBe(true)
 })
 
 test('an Agent hand-back inside a REPL script is told on its own result only', async ($, on) => {

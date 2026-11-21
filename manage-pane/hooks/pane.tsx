@@ -80,8 +80,13 @@ export const failureText = (errorKind: unknown, toolUseId: string | undefined, s
     ? QUEUED_TOO_LONG
     : 'manage-pane: the task tool failed; the list is unchanged.'
 
-export const remind = (agentId: string | undefined, tasks: readonly PaneTask[]) => {
+// The `#N` mark, said where the model reads it in every tool mode: a tool's description can
+// stay unloaded (deferred, or called from a script), a tool result's context never does.
+export const AGENT_HINT = 'An Agent description starting `#N ` (e.g. `#3 Review the diff`) lists that agent under task N.'
+
+// `withHint`: task_create's reminder also carries AGENT_HINT, once per created batch.
+export const remind = (agentId: string | undefined, tasks: readonly PaneTask[], withHint = false) => {
   const line = agentId === undefined ? openText(tasks, false) : undefined
   if (line === undefined) return {}
-  return { context: [line] }
+  return { context: withHint ? [line, AGENT_HINT] : [line] }
 }

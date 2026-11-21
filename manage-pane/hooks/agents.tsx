@@ -184,21 +184,29 @@ export const ownerTree = (
   )
 }
 
+// The agents a shown task draws live as its owner (a completed one holds only its frozen run).
+export const liveOwners = (list: readonly PaneTask[], isDoneHidden = false) => {
+  const isShown = (x: PaneTask) => !(isDoneHidden && x.status === 'completed')
+  return new Set(list.flatMap(x => (x.owner === undefined || !isShown(x) || (x.status === 'completed' && x.ownerRun !== undefined) ? [] : [x.owner])))
+}
+
 // Everyone working a task: its owner, then each other agent whose `#N` named it — parallel
-// spawns of one task, which the task's single owner cannot hold — in spawn order.
+// spawns of one task, which the task's single owner cannot hold — in spawn order. One that
+// another task draws live as its owner (`live`) is drawn there only.
 export const taskAgentsTree = (
   draw: Draw,
   t: Strings,
   task: PaneTask,
   all: Readonly<Record<string, PaneAgent>>,
   columns: number,
+  live: ReadonlySet<string> = new Set(),
 ) => {
   const owner =
     task.owner === undefined
       ? []
       : [ownerTree(draw, t, task.owner, all[task.owner], columns, task.status === 'completed' ? task.ownerRun : undefined)]
   const others = Object.entries(all)
-    .filter(([id, a]) => a.taskId === task.id && id !== task.owner)
+    .filter(([id, a]) => a.taskId === task.id && id !== task.owner && !live.has(id))
     .map(([id, a]) => ownerTree(draw, t, id, a, columns))
   const rows = [...owner, ...others]
   if (rows.length === 0) return undefined
@@ -228,7 +236,7 @@ export const otherAgentsTree = (
   // A running agent is placed when a task it owns shows it (a completed one holds only its
   // frozen run) or a shown task its `#N` names, owned by someone else, lists it.
   const isShown = (x: PaneTask) => !(isDoneHidden && x.status === 'completed')
-  const live = new Set(list.flatMap(x => (x.owner === undefined || !isShown(x) || (x.status === 'completed' && x.ownerRun !== undefined) ? [] : [x.owner])))
+  const live = liveOwners(list, isDoneHidden)
   const isNamed = (a: PaneAgent) => a.taskId !== undefined && ids.has(a.taskId)
   const isNamedElsewhere = (id: string, a: PaneAgent) => a.taskId !== undefined && list.some(x => x.id === a.taskId && isShown(x) && x.owner !== id)
   const running = Object.entries(all).filter(([id, a]) => a.isRunning && !live.has(id) && !isNamedElsewhere(id, a))
@@ -261,6 +269,13 @@ export const otherAgentsTree = (
 export const taskMarkOf = (description: string): { taskId?: string; rest: string } => {
   const m = /^#(\d+)\s+(\S[\s\S]*)$/.exec(description)
   return m === null ? { rest: description } : { taskId: m[1]!, rest: m[2]! }
+}
+
+// The task an Agent with no `#N` mark is drawn under: the one task in progress, when there
+// is exactly one; none with zero or several, so a guess never lands on the wrong task.
+export const soleLiveTask = (tasks: readonly PaneTask[]) => {
+  const live = tasks.filter(x => x.status === 'in_progress')
+  return live.length === 1 ? live[0]!.id : undefined
 }
 
 // The running agent other than `agentId` that owns `task`, which a claim must leave alone.
