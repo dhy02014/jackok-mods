@@ -371,6 +371,29 @@ test('a task run that never settles holds later task calls for at most a hook’
   expect(JSON.parse(said(await later)).created[0].subject).toBe('Later')
 })
 
+test('the limit counts from a run’s turn: a call queued behind a run released late waits that run’s full limit', async ($, on) => {
+  const clock = mock.clock(on, { now: 0 })
+  const hang = { isOn: false }
+  stub(on, { stallWrites: hang })
+  await $.session.start(START)
+  hang.isOn = true
+  void $.tool.call({ tool: CREATE, subject: 'Stuck' })
+  await new Promise(r => setTimeout(r, 0))
+  // Queued at once, its turn comes only when the first run's limit lets the queue go.
+  void $.tool.call({ tool: CREATE, subject: 'Second' })
+  await new Promise(r => setTimeout(r, 0))
+  const third = $.tool.call({ tool: CREATE, subject: 'Third' })
+  let isDone = false
+  void Promise.resolve(third).then(() => (isDone = true))
+  await clock.advance(HOOK_LIMIT_MS)
+  hang.isOn = false
+  await new Promise(r => setTimeout(r, 0))
+  // The second run began at the limit and still runs: the third waits for its own limit.
+  expect(isDone).toBe(false)
+  await clock.advance(HOOK_LIMIT_MS)
+  expect(JSON.parse(said(await third)).created[0].subject).toBe('Third')
+})
+
 test('the top row switches between the Task and Prompt tabs; task changes keep the picked tab', async ($, on) => {
   stub(on)
   const convo = instructionStub(on)

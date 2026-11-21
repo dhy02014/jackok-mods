@@ -254,18 +254,23 @@ const failedOrQueued = (_: unknown, e: { tool_use_id?: string }, next?: { error?
 // Task calls and claims run one at a time: calls a script fires side by side would each
 // persist a board read before the other's write and put it back over it. The queue waits on
 // one run for at most a hook's limit, so a run that never settles cannot hold every later call.
+// The limit counts from when a run's turn comes, so a slow run that is not stuck keeps the queue
+// for its full limit and never overlaps the next one.
 let taskQueue: Promise<unknown> = Promise.resolve()
 const serial = <T,>($: EngineInterface, body: () => Promise<T>): Promise<T> => {
-  const run = taskQueue.then(body)
   let timer: { cancel: () => void } | undefined
-  const stalled = new Promise<void>(resolve => {
+  let release: () => void = ignore
+  const stalled = new Promise<void>(resolve => (release = resolve))
+  const run = taskQueue.then(() => {
     // No clock, or a non-interactive session: the queue waits on the run alone.
-    if (!isInteractive) return
-    try {
-      timer = $.clock.after(HOOK_LIMIT_MS, resolve)
-    } catch {
-      // No clock.
+    if (isInteractive) {
+      try {
+        timer = $.clock.after(HOOK_LIMIT_MS, release)
+      } catch {
+        // No clock.
+      }
     }
+    return body()
   })
   const settled = run.then(
     () => timer?.cancel(),
