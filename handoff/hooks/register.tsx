@@ -261,10 +261,37 @@ const QUEUED = 'card: earlier card calls took too long, so this one did not run;
 // is answered QUEUED, one that began (or carries no id) the generic `failed`, since it may
 // already have written.
 const begun = new Set<string>()
+// Card paths whose write has not settled: a call the bound let past a stuck write must not
+// write the same file, which the late write would then replace.
+const writing = new Set<string>()
+// A later call waits on a run for at most a hook's limit, so one `$.fs` call that never
+// settles cannot hold every later call; a non-interactive session starts no timer.
+let isInteractive = true
 let cardQueue: Promise<unknown> = Promise.resolve()
-const serially = <T,>(run: () => Promise<T>): Promise<T> => {
-  const turn = cardQueue.then(run)
-  cardQueue = turn.catch(ignore)
+// The bound starts when a call's turn comes, so a slow call that is not stuck keeps the queue
+// for its full limit and never overlaps the next one.
+// `late()` turns true once the bound let the queue past this run: a run that resumes after it
+// must not write, since a later call may already have written the same card.
+const serially = <T,>($: EngineInterface, run: (late: () => boolean) => Promise<T>): Promise<T> => {
+  let timer: { cancel: () => void } | undefined
+  let isLate = false
+  let release: () => void = ignore
+  const stalled = new Promise<void>(resolve => (release = () => { isLate = true; resolve() }))
+  const turn = cardQueue.then(() => {
+    if (isInteractive) {
+      try {
+        timer = $.clock.after(HOOK_LIMIT_MS, release)
+      } catch {
+        // No clock: the queue waits on the run alone.
+      }
+    }
+    return run(() => isLate)
+  })
+  const settled = turn.then(
+    () => timer?.cancel(),
+    () => timer?.cancel(),
+  )
+  cardQueue = Promise.race([settled, stalled]).catch(ignore)
   return turn
 }
 
@@ -281,7 +308,7 @@ const unignoredNote = async ($: EngineInterface, root: string, path: string, dir
 
 // card with `status: done`: the card moves into handoff/closed/, and its doc beside it when
 // retireDoc allows.
-const retire = async ($: EngineInterface, slug: unknown, toolUseId: string | undefined) => {
+const retire = async ($: EngineInterface, slug: unknown, toolUseId: string | undefined, isLate: () => boolean = () => false) => {
   const key = str(slug)
   if (key === undefined) return { deny: 'card: status done needs slug, the card to close.' }
   const home = await homeOf($)
@@ -293,6 +320,8 @@ const retire = async ($: EngineInterface, slug: unknown, toolUseId: string | und
   const card = findCard(all, key)
   if (card === undefined) return { deny: `No handoff card "${key}" in ${shownDir(root, home)}/.` }
   const from = `${root}/${DIR}/${card.file}`
+  // A write to this card still pending would land after the move and bring it back open.
+  if (isLate() || writing.has(from)) return { deny: QUEUED }
   const moved = await moveInto($, from, `${root}/${CLOSED_DIR}`)
   if ('left' in moved) return { deny: `card: left ${shown(from)} in place: ${moved.left}` }
   const docLine = await retireDoc($, at, home, card, all, moved.to).catch(() => 'Left its doc in place: the move could not run.')
@@ -332,6 +361,7 @@ export const register: Register = (on, options) => {
   const holdOnExit = (options as Options | undefined)?.hold_on_exit === true
 
   on('session.start', async ($, e, next) => {
+    isInteractive = e.isInteractive !== false
     const { language } = await $.settings.read().catch(() => ({ language: undefined }))
     await $.command.register({ name: 'handoff', description: t.commandDescription }).catch(ignore)
     for (const tool of toolsFor(language)) await $.tool.register(tool).catch(ignore)
@@ -396,7 +426,7 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: CARD }, async ($, e, next) => {
     const startedAt = await $.clock.now().catch(() => undefined)
-    return serially(async () => {
+    return serially($, async late => {
       // Timed out (or about to) while queued: the engine answers such a call with `failed`, so
       // nothing may be written now. The clock check also covers an engine with no budget.
       const waited = startedAt === undefined ? 0 : (await $.clock.now()) - startedAt
@@ -411,7 +441,7 @@ export const register: Register = (on, options) => {
       }
       const refused = await refusal($, Object.fromEntries(FIELDS.filter(k => e[k] !== undefined).map(k => [k, e[k]])))
       if (refused !== undefined) return { deny: refused }
-      if (e.status === 'done') return retire($, e.slug, e.tool_use_id)
+      if (e.status === 'done') return retire($, e.slug, e.tool_use_id, () => late() || next?.signal?.aborted === true)
       if (e.status !== undefined && asStatus(e.status) === undefined) {
         return { deny: `Unknown status "${String(e.status)}": use open, hold or done.` }
       }
@@ -491,7 +521,14 @@ export const register: Register = (on, options) => {
       if (found === undefined && (await exists($, path))) {
         return { deny: `card: ${cardPath(shownDir(root, home), card)} already exists; no card written.` }
       }
-      await $.fs.write(path, cardText(card))
+      // Checked and claimed in one synchronous step: no await between the check and the add.
+      if (late() || next?.signal?.aborted === true || writing.has(path)) return { deny: QUEUED }
+      writing.add(path)
+      try {
+        await $.fs.write(path, cardText(card))
+      } finally {
+        writing.delete(path)
+      }
       const note = found === undefined && isGit && names.length === 0 ? await unignoredNote($, root, path, shownDir(root, home)) : undefined
       await refresh($).catch(ignore)
       await markTouched($)

@@ -276,14 +276,14 @@ test('a write keeps the tasks another process of the session stored, and drops w
   expect((store.get('board:sid-1') as StoredBoard).tasks.find(x => x.id === '3')).toMatchObject({ status: 'completed' })
 })
 
-test('a non-interactive start opens nothing; a subagent’s call shares the one list', async ($, on) => {
+test('a non-interactive session opens no pane, at start or at a list’s first task; a subagent’s call shares the one list', async ($, on) => {
   const { opened } = stub(on)
   await $.session.start({ ...START, isInteractive: false })
   expect(opened).toEqual([])
   await $.tool.call({ tool: CREATE, subject: 'Main task', description: 'd' })
   await $.tool.call({ tool: CREATE, subject: 'Sub task', description: 'd', agentId: 'a1' })
   await $.tool.call({ tool: UPDATE, taskId: '1', status: 'completed' })
-  expect(opened).toEqual(['manage-pane'])
+  expect(opened).toEqual([])
 
   const ui = await mountPane($)
   expect(await ui.find({ type: 'Text', text: 'Sub task' })).toBeDefined()
@@ -308,4 +308,37 @@ test('a /resume or /branch clears the old list at once; the new session’s list
   ui = await mountPane($)
   expect(await ui.find({ type: 'Text', text: 'Resumed work' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Old' })).toBeUndefined()
+})
+
+// Every timer the mod asks for, by kind and delay; each request is refused, which the mod outlives.
+const timers = (on: Parameters<Parameters<typeof test>[1]>[1]) => {
+  const asked: string[] = []
+  on('clock.after', (_, e) => {
+    asked.push(`after ${e.ms}`)
+    throw new Error('recorded')
+  })
+  on('clock.every', (_, e) => {
+    asked.push(`every ${e.ms}`)
+    throw new Error('recorded')
+  })
+  return asked
+}
+
+test('a non-interactive session starts no timer: no queue limit, blink, scroll, scan or prune timer', async ($, on) => {
+  stub(on)
+  const asked = timers(on)
+  await $.session.start({ ...START, isInteractive: false })
+  await $.tool.call({ tool: CREATE, subject: 'Live', description: 'd', status: 'in_progress' })
+  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'completed' })
+  await $.tool.call({ tool: LIST })
+  expect(asked).toEqual([])
+})
+
+test('an interactive session’s task call waits in the queue under a 10 s timer and an in-progress task blinks', async ($, on) => {
+  stub(on)
+  const asked = timers(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'Live', description: 'd', status: 'in_progress' })
+  expect(asked).toContain('after 10000')
+  expect(asked).toContain('every 500')
 })

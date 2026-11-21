@@ -56,6 +56,8 @@ type Options = {
 
 // From `register`'s options; the default is the manifest's.
 let openOnStart = true
+// From `session.start`: a non-interactive (`-p`) session opens no pane and starts no timer.
+let isInteractive = true
 
 const t = EN
 
@@ -112,7 +114,7 @@ const blinkTick = async ($: EngineInterface) => {
 
 const syncBlink = async ($: EngineInterface) => {
   const live = await isLive($)
-  if (live && blinkTimer === undefined) {
+  if (live && blinkTimer === undefined && isInteractive) {
     await update($, blink, () => true)
     blinkTimer = $.clock.every(BLINK_MS, () => void blinkTick($).catch(ignore))
   } else if (!live && blinkTimer !== undefined) {
@@ -227,7 +229,7 @@ const persist = async (
 // A task that goes in progress is brought into view, moving the pane's window the least
 // that shows it whole. On the clock: after the redraw that draws it.
 const follow = ($: EngineInterface, id: string | undefined) => {
-  if (id === undefined) return
+  if (id === undefined || !isInteractive) return
   $.clock.after(1, () => void $.ui.scroll({ to: { key: taskKey(id) }, in: PANE }).catch(ignore))
 }
 
@@ -257,10 +259,12 @@ const serial = <T,>($: EngineInterface, body: () => Promise<T>): Promise<T> => {
   const run = taskQueue.then(body)
   let timer: { cancel: () => void } | undefined
   const stalled = new Promise<void>(resolve => {
+    // No clock, or a non-interactive session: the queue waits on the run alone.
+    if (!isInteractive) return
     try {
       timer = $.clock.after(HOOK_LIMIT_MS, resolve)
     } catch {
-      // No clock: the queue waits on the run alone.
+      // No clock.
     }
   })
   const settled = run.then(
@@ -292,14 +296,23 @@ let scanning: Promise<void> = Promise.resolve()
 const scanInstructions = ($: EngineInterface) => (scanning = scanning.catch(ignore).then(() => scanOnce($)))
 
 // A main-loop call's scan, on the clock (off the call's path); calls that end before it runs share it.
-let scanQueued = false
-const queueScan = ($: EngineInterface) => {
-  if (scanQueued) return
-  scanQueued = true
-  $.clock.after(1, () => {
-    scanQueued = false
-    void scanInstructions($).catch(ignore)
-  })
+// A non-interactive session skips it: only the pane shows the list, and turn.complete still scans.
+// A refused timer neither throws nor fires, so a scan queued SCAN_LOST_MS ago counts as lost.
+const SCAN_LOST_MS = 1000
+let scanQueuedAt: number | undefined
+const queueScan = async ($: EngineInterface) => {
+  if (!isInteractive) return
+  const now = await $.clock.now()
+  if (scanQueuedAt !== undefined && now - scanQueuedAt < SCAN_LOST_MS) return
+  scanQueuedAt = now
+  try {
+    $.clock.after(1, () => {
+      scanQueuedAt = undefined
+      void scanInstructions($).catch(ignore)
+    })
+  } catch {
+    scanQueuedAt = undefined
+  }
 }
 
 // Each loaded file is read back so its size ends where the file does; one that cannot be read
@@ -433,8 +446,10 @@ const claimNow = async ($: EngineInterface, taskId: string, agentId: string) => 
 export const register: Register = (on, options) => {
   const o = (options ?? {}) as Options
   openOnStart = flag(o.open_on_start, true)
+  isInteractive = true
 
   on('session.start', async ($, e, next) => {
+    isInteractive = e.isInteractive !== false
     await $.command.register({ name: 'pane', description: t.commandDescription }).catch(ignore)
     const { language } = (await $.settings.read().catch(() => undefined)) ?? {}
     for (const tool of toolsFor({ language })) await $.tool.register(tool).catch(ignore)
@@ -443,11 +458,12 @@ export const register: Register = (on, options) => {
     blinkTimer = undefined
     await syncBlink($).catch(ignore)
     const started = await next(e)
-    // On the clock, off the start's path; never the current session's list.
+    // Off the start's path (on the clock where timers may run); never the current session's list.
     const sid = await sessionId($)
-    $.clock.after(1, () => void prune($, BOARDS_KEPT, sid).catch(ignore))
+    if (isInteractive) $.clock.after(1, () => void prune($, BOARDS_KEPT, sid).catch(ignore))
+    else void prune($, BOARDS_KEPT, sid).catch(ignore)
     await scanInstructions($).catch(ignore)
-    if (openOnStart && e.isInteractive !== false) await openPane($).catch(ignore)
+    if (openOnStart && isInteractive) await openPane($).catch(ignore)
     return started
   })
 
@@ -567,7 +583,7 @@ export const register: Register = (on, options) => {
       // A rule a read pulled in rides the next request: a scan after a call keeps the list near
       // live and banks close to an auto-compaction mid-turn.
       const ran = await next(e)
-      queueScan($)
+      await queueScan($).catch(ignore)
       return ran
     }
     // Only subagents' calls, and only agents this load saw spawn. A REPL script is no row of
@@ -657,7 +673,7 @@ export const register: Register = (on, options) => {
       const line = handbackText(tasks, ownersIn(tasks, e.text))
       return next(line === undefined ? e : { ...e, context: [...(e.context ?? []), line] })
     }
-    const sender = kind === 'peer' ? ENVELOPE.exec(e.text)?.[1] : undefined
+    const sender = kind === 'peer' || kind === 'peer-send-message' ? ENVELOPE.exec(e.text)?.[1] : undefined
     const id = sender === undefined ? undefined : (idByName.get(sender) ?? sender)
     if (id === undefined || !handingBack.delete(id)) return next(e)
     told.add(id)
@@ -700,7 +716,7 @@ export const register: Register = (on, options) => {
     // The first task of a list reopens the pane; one the person closed mid-list stays
     // closed until the next list. /pane toggles it any time. The tab the person picked
     // stays put: the Task tab redraws from the board whether it is shown or not.
-    if (seen.wasIdle) await openPane($).catch(ignore)
+    if (seen.wasIdle && isInteractive) await openPane($).catch(ignore)
     await syncBlink($).catch(ignore)
     follow($, made.filter(x => x.status === 'in_progress').at(-1)?.id)
     await remember($, e.tool_use_id, createLines(made))

@@ -70,7 +70,20 @@ const stub = (
     fail?: 'mkdir' | 'mv' | 'skip'
   } = {},
 ) => {
-  const clock = mock.clock(on, { now: NOW })
+  // Each `$.clock.after` the mod schedules, recorded on its way to the mock clock (a name
+  // takes one `on`, so the mock's own handler is wrapped as it registers).
+  const afters: unknown[] = []
+  const recording = ((name: string, ...rest: unknown[]) => {
+    const i = rest.findIndex(a => typeof a === 'function')
+    if (name !== 'clock.after' || i < 0) return (on as (...a: unknown[]) => unknown)(name, ...rest)
+    const handler = rest[i] as (...a: unknown[]) => unknown
+    rest[i] = (...a: unknown[]) => {
+      afters.push(a[1])
+      return handler(...a)
+    }
+    return (on as (...a: unknown[]) => unknown)(name, ...rest)
+  }) as On
+  const clock = mock.clock(recording, { now: NOW })
   // The next folder listing answers the files as they are now, once the test advances the clock
   // by `ms` (holdNextList); later listings answer at once.
   let held: { ms: number; files: Map<string, string> } | undefined
@@ -87,6 +100,10 @@ const stub = (
   const runs: string[][] = []
   // Set `ms` above 0 and every rev-parse after it answers, failed, only that much later.
   const gitHang = { ms: 0 }
+  // Set `isOn` and every fs.write after it never settles, as on a stuck network drive.
+  const writeHang = { isOn: false }
+  // The next fs.exists answers only after this many ms (once).
+  const existsHang = { ms: 0 }
   // A seeded card was last changed at noon of its filename's date; a write changes it now.
   const mtimes = new Map<string, number>()
   const mtimeOf = (p: string) => {
@@ -124,12 +141,19 @@ const stub = (
     return { decision: check, reason: 'deny rule mcp__handoff__card' }
   })
   on('fs.write', ($, e) => {
+    if (writeHang.isOn) return new Promise<never>(() => {})
     files.set(norm(e.path), e.text)
     mtimes.set(norm(e.path), NOW)
     return { value: undefined }
   })
   on('fs.read', ($, e) => (files.has(norm(e.path)) ? { value: files.get(norm(e.path))! } : { deny: 'ENOENT' }))
-  on('fs.exists', ($, e) => ({ value: exists(norm(e.path)) }))
+  on('fs.exists', ($, e) => {
+    const answer = { value: exists(norm(e.path)) }
+    if (existsHang.ms === 0) return answer
+    const ms = existsHang.ms
+    existsHang.ms = 0
+    return clock.sleep(ms).then(() => answer)
+  })
   on('fs.list', ($, e) => {
     const dir = norm(e.path)
     if (!isDir(dir)) return { deny: 'ENOENT' }
@@ -216,7 +240,7 @@ const stub = (
     const { Text } = $.ui.resolve(e)
     return <Text>below</Text>
   })
-  return { files, session, runs, limits, dirs, registered, checks, clock, holdNextList, gitHang }
+  return { files, session, runs, limits, dirs, registered, checks, clock, holdNextList, gitHang, writeHang, existsHang, afters }
 }
 
 const said = (r: { result?: unknown; text?: string; deny?: string }) => String(r.deny ?? r.text ?? r.result)
@@ -1248,6 +1272,64 @@ test('calls the engine times out while queued are told to call again and never w
   expect(said(await slow)).toBe(`Created ${CARDS}/2026-10-11-slow.md\nslug: slow`)
   await clock.settle()
   expect([...files.keys()].filter(p => p.startsWith(`${CARDS}/`))).toEqual([`${CARDS}/2026-10-11-slow.md`])
+})
+
+test('a card call whose write never settles holds later calls for no longer than the hook limit', async ($, on) => {
+  const { files, clock, writeHang, afters } = stub(on)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  writeHang.isOn = true
+  void $.tool.call({ tool: WRITE, tool_use_id: 's1', title: 'Stuck', next: 'n' } as never)
+  await clock.settle()
+  expect(afters).toHaveLength(1)
+  await clock.advance(10_000)
+  writeHang.isOn = false
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Later', next: 'n' }))).toBe(`Created ${CARDS}/2026-10-11-later.md\nslug: later`)
+  expect(files.has(`${CARDS}/2026-10-11-later.md`)).toBe(true)
+})
+
+test('a card call in a non-interactive session starts no timer', async ($, on) => {
+  const { afters } = stub(on)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: false })
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Quiet', next: 'n' }))).toBe(`Created ${CARDS}/2026-10-11-quiet.md\nslug: quiet`)
+  expect(afters).toEqual([])
+})
+
+test('a call the bound lets past a stuck write never writes the same card file', async ($, on) => {
+  const { files, clock, writeHang } = stub(on)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  writeHang.isOn = true
+  void $.tool.call({ tool: WRITE, tool_use_id: 's1', title: 'Stuck', next: 'n' } as never)
+  await clock.settle()
+  await clock.advance(10_000)
+  writeHang.isOn = false
+  // Same title, same day: the stuck write still holds that path, so this one is refused.
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Stuck', next: 'm' }))).toMatch(/^card: earlier card calls took too long/)
+  expect(files.has(`${CARDS}/2026-10-11-stuck.md`)).toBe(false)
+})
+
+test('a call that resumes after the bound let the queue past it writes nothing over a later card', async ($, on) => {
+  const { files, clock, existsHang } = stub(on)
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  existsHang.ms = 15_000
+  const first = $.tool.call({ tool: WRITE, tool_use_id: 's1', title: 'Slow', next: 'first' } as never)
+  await clock.settle()
+  await clock.advance(10_000)
+  expect(said(await $.tool.call({ tool: WRITE, title: 'Slow', next: 'second' }))).toBe(`Created ${CARDS}/2026-10-11-slow.md\nslug: slow`)
+  await clock.advance(5_000)
+  expect(said(await first)).toMatch(/^card: earlier card calls took too long/)
+  expect(files.get(`${CARDS}/2026-10-11-slow.md`)).toMatch(/second/)
+})
+
+test('closing a card while a write to it is still pending is refused; the card stays open', async ($, on) => {
+  const { files, clock, writeHang } = stub(on, { files: { [`${CARDS}/2026-10-10-seen.md`]: card({ title: 'Seen' }) } })
+  await $.session.start({ cwd: MAIN, surface: 'terminal', isInteractive: true })
+  writeHang.isOn = true
+  void $.tool.call({ tool: WRITE, tool_use_id: 's1', slug: 'seen', next: 'm' } as never)
+  await clock.settle()
+  await clock.advance(10_000)
+  writeHang.isOn = false
+  expect(said(await $.tool.call({ tool: WRITE, slug: 'seen', status: 'done' }))).toMatch(/^card: earlier card calls took too long/)
+  expect(files.has(`${CARDS}/2026-10-10-seen.md`)).toBe(true)
 })
 
 const GIT_SLOW = 'card: git did not answer within 5 s; no card written. Call it again.'

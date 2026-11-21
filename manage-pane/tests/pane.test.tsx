@@ -110,6 +110,14 @@ test('a peer prompt after its sender’s SubagentHandback carries the hand-back 
   expect(seen.at(-1)).toBeUndefined()
 })
 
+test('a peer-send-message prompt after its sender’s SubagentHandback carries the hand-back reminder too', async ($, on) => {
+  const { seen, handBack } = await peerSetup($, on)
+  await handBack('a1b2c3d4e5f60718')
+  const report = '<agent-message from="a1b2c3d4e5f60718">\n  Done.\n</agent-message>'
+  await $.prompt.submit({ text: report, wait: false, origin: { kind: 'peer-send-message' } as never })
+  expect(seen.at(-1)).toEqual([`Agent a1b2c3d4 handed back; it owns #1 — reassign, clear owner, or complete it. ${OPEN_BOTH}`])
+})
+
 test('a peer prompt with no hand-back before it, a refused hand-back, or another envelope carries nothing', async ($, on) => {
   const { seen, handback, handBack, peer } = await peerSetup($, on)
   // A mid-run SendMessage arrives in the same envelope.

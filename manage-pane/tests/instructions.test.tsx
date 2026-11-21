@@ -169,3 +169,26 @@ test('main-loop calls that end before the scan share one, a REPL call and its sc
   await settle()
   expect(seen.scans - base).toBe(3)
 })
+
+// A refused timer does not throw: its callback just never runs. That a fired one scans is the test above.
+test('a scan timer the engine refuses stops no later scan: a call a second on queues another', async ($, on) => {
+  stub(on)
+  const clock = { now: 0, scanTimers: 0 }
+  on('clock.now', () => ({ value: clock.now }))
+  on('clock.after', (_, e) => {
+    if (e.ms === 1) clock.scanTimers++
+    return { deny: 'refused' } as never
+  })
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
+  await $.session.start(START)
+  const base = clock.scanTimers
+  await $.tool.call({ tool: 'Bash', command: 'a' })
+  expect(clock.scanTimers - base).toBe(1)
+  // Within the second the lost scan still counts as queued; past it, a call queues afresh.
+  clock.now = 999
+  await $.tool.call({ tool: 'Bash', command: 'b' })
+  expect(clock.scanTimers - base).toBe(1)
+  clock.now = 1000
+  await $.tool.call({ tool: 'Bash', command: 'c' })
+  expect(clock.scanTimers - base).toBe(2)
+})
