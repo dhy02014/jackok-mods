@@ -1,6 +1,6 @@
 export type PaneTaskStatus = 'pending' | 'in_progress' | 'completed'
 
-/** One task of the session's list, as the task_create/task_update tools left it. */
+/** One task of the session's list, as the task tools and the subagent hooks left it. */
 export type PaneTask = {
   /** A decimal string, minted per session from 1 and never reused. */
   id: string
@@ -9,7 +9,7 @@ export type PaneTask = {
   status: PaneTaskStatus
   /** The spinner text; shown while `in_progress`. */
   activeForm?: string
-  /** The agent id the caller assigned it to with task_update; never inferred. */
+  /** The agent working it: the one its spawn made the task for or whose `#N` claimed it, or one task_update assigned. */
   owner?: string
   /** The owner's run as it stood when the task was completed; drawn in place of the live record. */
   ownerRun?: PaneOwnerRun
@@ -52,9 +52,11 @@ export type PaneAgent = {
   /** Set when it runs in a worktree of its own, whose path no event gives while it runs. */
   isWorktree?: true
   description: string
-  /** The open task its `#N` named at spawn, claimed or not: drawn under it beside the task's owner. */
+  /** The task made for it at spawn, or the open task its `#N` named, claimed or not: drawn under it beside the task's owner. */
   taskId?: string
   isRunning: boolean
+  /** How its current run ended, as its `agent.report` said; absent while it runs or when no report came. */
+  outcome?: 'completed' | 'failed' | 'stopped'
   startedAt: number
   /** When its turn completed; absent while it runs. */
   endedAt?: number

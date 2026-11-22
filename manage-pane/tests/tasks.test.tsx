@@ -1,12 +1,14 @@
 import { expect, mock, test } from 'claude-code/testing'
 import { START, CREATE, UPDATE, LIST, stub, mountPane, said, created, agentStub, mountRows, done, spawn, opening, prompt, rows } from './helpers'
 
-test('task_create’s description tells of the `#N` claim; task_update’s of reassigning', async ($, on) => {
+test('task_create’s description says Agent dispatches track themselves and tells of the `#N` claim; task_update’s of reassigning', async ($, on) => {
   const { specText } = stub(on)
   await $.session.start(START)
+  expect(specText[0]).toMatch(/^Agent dispatches are tracked automatically; use these only for an optional up-front list/)
   expect(specText[0]).toContain('An Agent description starting `#3 ` claims task 3.')
   expect(specText[1]).toContain('`owner` reassigns ("" clears).')
-  expect(specText.join('').length).toBeLessThan(1100)
+  // The auto-tracking sentence costs ~90 characters once and saves a task call per dispatch.
+  expect(specText.join('').length).toBeLessThan(1170)
 })
 
 test('with a language set, task_create and task_update ask for subject and activeForm in it; task_list does not',async ($, on) => {
@@ -14,7 +16,7 @@ test('with a language set, task_create and task_update ask for subject and activ
   await $.session.start(START)
   const asked = ' Write subject and activeForm in Korean.'
   expect([specText[0]!.includes(asked), specText[1]!.includes(asked), specText[2]!.includes(asked)]).toEqual([true, true, false])
-  expect(specText.join('').length).toBeLessThan(1200)
+  expect(specText.join('').length).toBeLessThan(1270)
 })
 
 test('with no language set, no tool spec names a language', async ($, on) => {

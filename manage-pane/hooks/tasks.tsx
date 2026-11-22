@@ -25,7 +25,8 @@ const UPDATE_DESCRIPTION =
 const OWNER_DESCRIPTION = ' `owner` reassigns ("" clears).'
 // The `#N` claim is taught here only: the built-in Agent description stays as it is.
 const CREATE_DESCRIPTION =
-  'Track work as tasks; subject is required, status in_progress starts it now. Several go in one call as `tasks`, in order.' +
+  'Agent dispatches are tracked automatically; use these only for an optional up-front list of your own work.' +
+  ' subject is required, status in_progress starts it now. Several go in one call as `tasks`, in order.' +
   ' Use these, not TaskCreate/TaskUpdate/TodoWrite: only these show in the pane.' +
   ' An Agent description starting `#3 ` claims task 3.' +
   ' Returns JSON {"created":[{"id","subject"}]}.'
@@ -73,7 +74,7 @@ export const TOOLS = [
   },
   {
     name: 'task_list',
-    // Deferred: the Open-tasks reminder covers the common case; this is for after a compaction.
+    // Deferred: the pane shows the list; this is for a model that lost track (after a compaction).
     isDeferred: true,
     description: 'List open tasks with status and blockers.',
   },
@@ -228,52 +229,6 @@ export const listText = (tasks: readonly PaneTask[]) => {
     return `#${t.id} [${t.status}] ${t.subject}${owner}${blocked}`
   })
   return [...lines, ...(done > 0 ? [`(${done} completed, not listed)`] : [])].join('\n')
-}
-
-// ---- what the main loop is reminded of: model-only context, never the system prompt ----
-
-const SUBJECT_MAX = 60
-const OWNER_SHOWN = 8
-
-const clip = (s: string) => (s.length > SUBJECT_MAX ? `${s.slice(0, SUBJECT_MAX - 1)}…` : s)
-
-const openOf = (tasks: readonly PaneTask[]) => tasks.filter(t => t.status !== 'completed')
-
-// `Open tasks: #2 [in_progress] subject (owner: a1b2c3d4), #4 [pending] subject`, or
-// undefined while every task is completed. The reminder on a task tool's own result
-// drops subjects (`#2 [in_progress]`): the model just wrote them and they are in context.
-export const openText = (tasks: readonly PaneTask[], withSubject = true) => {
-  const open = openOf(tasks)
-  if (open.length === 0) return undefined
-  const rows = open.map(t => {
-    const owner = t.owner !== undefined ? ` (owner: ${t.owner.slice(0, OWNER_SHOWN)})` : ''
-    return `#${t.id} [${t.status}]${withSubject ? ` ${clip(t.subject)}` : ''}${owner}`
-  })
-  return `Open tasks: ${rows.join(', ')}`
-}
-
-// Whether `text` names `id` as a whole token: a notification's text is the engine's
-// prose, so the id is looked for rather than parsed out of a format.
-export const namesId = (text: string, id: string) =>
-  new RegExp(`(?:^|[^A-Za-z0-9])${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:[^A-Za-z0-9]|$)`).test(text)
-
-// The owners of open tasks that `text` names as a whole token.
-export const ownersIn = (tasks: readonly PaneTask[], text: string) =>
-  [...new Set(openOf(tasks).flatMap(t => (t.owner !== undefined ? [t.owner] : [])))].filter(id => namesId(text, id))
-
-// The reminder at a hand-back: the tasks each agent owns, then the open list. With no
-// agent named (a notification no owner matched) the open list alone.
-export const handbackText = (tasks: readonly PaneTask[], agentIds: readonly string[]) => {
-  const open = openText(tasks)
-  if (open === undefined) return undefined
-  const lines = agentIds.map(id => {
-    const owned = openOf(tasks).filter(t => t.owner === id)
-    const label = id.slice(0, OWNER_SHOWN)
-    return owned.length === 0
-      ? `Agent ${label} handed back.`
-      : `Agent ${label} handed back; it owns #${owned.map(t => t.id).join(', #')} — reassign, clear owner, or complete it.`
-  })
-  return [...lines, open].join(' ')
 }
 
 // The constructors a tree is drawn with: `$.ui.resolve(e)`'s, handed in by the render hook.

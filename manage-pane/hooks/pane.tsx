@@ -1,8 +1,5 @@
-import type { ToolCallResult } from 'claude-code'
-
-import type { PaneTask } from '../types'
 import type { Strings } from './strings'
-import { openText, type Draw } from './tasks'
+import type { Draw } from './tasks'
 
 // The pane's tabs in order, by id (their names are in ./strings): a tab's place is its hotkey
 // (the first `1`, the next `2`, up to `9`), so a new tab is one entry here and takes the next digit.
@@ -56,10 +53,6 @@ export const paneTree = (
   )
 }
 
-// `next`'s context is kept whole, as the engine requires of an answer built on it.
-export const withContext = (ran: ToolCallResult, line: string | undefined): ToolCallResult =>
-  line === undefined || ran.deny !== undefined ? ran : ({ ...ran, context: [...(ran.context ?? []), line] } as ToolCallResult)
-
 // ---- a task call's time: its wait in the mod's queue counts against the hook's limit ----
 
 export const HOOK_LIMIT_MS = 10_000
@@ -79,14 +72,3 @@ export const failureText = (errorKind: unknown, toolUseId: string | undefined, s
   errorKind === 'timeout' && toolUseId !== undefined && !started.has(toolUseId)
     ? QUEUED_TOO_LONG
     : 'manage-pane: the task tool failed; the list is unchanged.'
-
-// The `#N` mark, said where the model reads it in every tool mode: a tool's description can
-// stay unloaded (deferred, or called from a script), a tool result's context never does.
-export const AGENT_HINT = 'An Agent description starting `#N ` (e.g. `#3 Review the diff`) lists that agent under task N.'
-
-// `withHint`: task_create's reminder also carries AGENT_HINT, once per created batch.
-export const remind = (agentId: string | undefined, tasks: readonly PaneTask[], withHint = false) => {
-  const line = agentId === undefined ? openText(tasks, false) : undefined
-  if (line === undefined) return {}
-  return { context: withHint ? [line, AGENT_HINT] : [line] }
-}

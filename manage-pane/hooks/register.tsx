@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
 import type { PaneBoard, PaneCall, PaneTask } from '../types'
 import {
@@ -13,34 +13,19 @@ import {
   targetOf,
   liveOwners,
   otherAgentsTree,
-  soleLiveTask,
   taskAgentsTree,
   taskMarkOf,
+  tasksDone,
   touch,
 } from './agents'
 import { flag, idOf, newTask, patchOf } from './input'
 import { bankIfShrunk, diskBody, instructionsTree, mergeLoads, scanLoads } from './instructions'
-import { failureText, HOOK_LIMIT_MS, isOutOfTime, paneTree, QUEUED_TOO_LONG, remind, withContext } from './pane'
+import { failureText, HOOK_LIMIT_MS, isOutOfTime, paneTree, QUEUED_TOO_LONG } from './pane'
 import { slashed } from './platform'
 import { EN } from './strings'
-import type { AppliedMany } from './tasks'
+import type { AppliedMany, Patch } from './tasks'
 import { createdLines, createLines, summary, updateLines, withText } from './toolrow'
-import {
-  applyPatches,
-  asStatus,
-  asTask,
-  doneFilter,
-  EMPTY,
-  handbackText,
-  listText,
-  namesId,
-  own,
-  ownersIn,
-  str,
-  taskKey,
-  tasksTree,
-  toolsFor,
-} from './tasks'
+import { applyPatches, asStatus, asTask, doneFilter, EMPTY, listText, own, str, taskKey, tasksTree, toolsFor } from './tasks'
 
 // One pane, open at session start: the session's tasks on top, its subagents pinned
 // under them, and below them the instruction files the context carried with their load
@@ -67,9 +52,6 @@ const CREATE = 'mcp__manage-pane__task_create'
 const UPDATE = 'mcp__manage-pane__task_update'
 const LIST = 'mcp__manage-pane__task_list'
 const AGENT = 'Agent'
-// The tool a subagent ends its run with in auto mode (not a fork); a background agent's report
-// then reaches the main loop as a peer prompt. Whether a foreground one's also does is unverified.
-const HANDBACK = 'SubagentHandback'
 // Code mode's script tool: no row of its own; the calls its script makes are.
 const REPL = 'REPL'
 
@@ -334,43 +316,78 @@ const scanOnce = async ($: EngineInterface) => {
   await update($, instructions, prev => mergeLoads(prev, base, live))
 }
 
-// ---- open-task reminders: a tool result's `context`, which the model reads and the user
-// never sees. Not the system prompt (a section change busts the prompt cache) and not the
-// prompt's text (a rewrite changes the message on screen). Main loop only.
+// ---- a subagent's task: made at its spawn, completed at its report, reopened at its resume ----
 
-const currentTasks = async ($: EngineInterface) => own(await read($, board), await sessionId($)).tasks
-
-// Subagents whose SubagentHandback call has run and whose report has not yet reached the main
-// loop. A peer prompt counts as a hand-back only from one of these: a mid-run SendMessage
-// arrives in the same envelope.
-// Keyed by agent id.
-const handingBack = new Set<string>()
-// Agents whose hand-back a peer prompt already told, so a foreground Agent result still pending tells none.
-const told = new Set<string>()
 // An agent spawned with a name, by that name: SendMessage addresses it so.
 const idByName = new Map<string, string>()
-// The envelope's opening line, at column zero: the harness indents the report under it. Seen live
-// with an agent id as the sender; a named agent's envelope sender is unverified live, so a name
-// is mapped to its id when it is one this load saw spawn.
-const ENVELOPE = /^<agent-message from="([^"]+)">/
 
-const forgetHandbacks = () => {
-  handingBack.clear()
-  told.clear()
-  idByName.clear()
+type NewItem = { subject: string; fields: Record<string, unknown> }
+
+// New tasks numbered past every id the session minted, in one board write; `owner` goes on each.
+// Callers hold the task queue (`serial`), so side-by-side creates and spawns each get their own ids.
+const addTasks = async ($: EngineInterface, items: readonly NewItem[], owner?: string) => {
+  await restore($).catch(ignore)
+  const sid = await sessionId($)
+  // Another process of the same session may have minted ids since this one loaded.
+  const stored = (sid === undefined ? undefined : await storedBoard($, sid))?.lastId ?? 0
+  const seen = { wasIdle: false }
+  const local = await update($, board, b => {
+    const cur = own(b, sid)
+    const first = Math.max(cur.lastId, stored, ...cur.tasks.map(x => Number(x.id))) + 1
+    const made = items.map((it, i) => ({ ...newTask(first + i, it.subject, it.fields), ...(owner !== undefined ? { owner } : {}) }))
+    seen.wasIdle = cur.tasks.every(x => x.status === 'completed')
+    return { sessionId: cur.sessionId, lastId: first + items.length - 1, tasks: [...cur.tasks, ...made] }
+  })
+  const made = local.tasks.slice(-items.length)
+  await persist($, local, { write: made })
+  // The first task of a list reopens the pane; one the person closed mid-list stays
+  // closed until the next list. /pane toggles it any time. The tab the person picked
+  // stays put: the Task tab redraws from the board whether it is shown or not.
+  if (seen.wasIdle && isInteractive) await openPane($).catch(ignore)
+  await syncBlink($).catch(ignore)
+  follow($, made.filter(x => x.status === 'in_progress').at(-1)?.id)
+  return made
 }
 
-// A foreground Agent call resolves when the subagent has handed back; a background
-// launch (`async_launched`) is not one, its report comes as a task notification or a peer prompt.
-const agentHandback = async ($: EngineInterface, ran: ToolCallResult) => {
-  const r = ran.result as { status?: unknown; agentId?: unknown } | undefined
-  if (r?.status !== 'completed' || typeof r.agentId !== 'string') return ran
-  // Whether a foreground hand-back also yields a peer prompt is unverified: one that already
-  // told this hand-back leaves the result as it is, and one still to come tells nothing.
-  handingBack.delete(r.agentId)
-  if (told.delete(r.agentId)) return ran
-  return withContext(ran, handbackText(await currentTasks($).catch(() => []), [r.agentId]))
+// The patches `plan` picks from the session's list, applied in one board write and stored.
+const patchList = async ($: EngineInterface, plan: (tasks: readonly PaneTask[]) => Patch[]) => {
+  await restore($).catch(ignore)
+  const sid = await sessionId($)
+  let applied: AppliedMany = { error: 'unchanged' }
+  const local = await update($, board, b => {
+    const cur = own(b, sid)
+    const patches = plan(cur.tasks)
+    applied = patches.length === 0 ? { error: 'unchanged' } : applyPatches(cur.tasks, patches)
+    return applied.error !== undefined ? b : { ...cur, tasks: applied.tasks }
+  })
+  const done = applied as AppliedMany
+  if (done.error !== undefined || done.touched.length === 0) return []
+  await persist($, local, { write: local.tasks.filter(x => done.touched.includes(x.id)) })
+  await syncBlink($).catch(ignore)
+  return done.touched
 }
+
+// A run that ended `completed` completes every open task its agent owns, its run frozen on each.
+// A failed or stopped run reports too and leaves them open. A task another agent still works
+// waits for that agent's report (`tasksDone`).
+const finish = ($: EngineInterface, agentId: string) =>
+  serial($, async () => {
+    const team = await read($, agents)
+    const now = await $.clock.now().catch(() => Date.now())
+    const frozen = (owner: string) => (team[owner] !== undefined ? runOf(team[owner], now) : undefined)
+    return patchList($, tasks => tasksDone(tasks, team, agentId).map(x => ({ ...patchOf(x.id, { status: 'completed' }), runOf: frozen })))
+  })
+
+// A resumed agent's newest task goes back in progress if it was completed (which thaws its frozen
+// run); the run's report completes it again.
+const reopen = ($: EngineInterface, agentId: string) =>
+  serial($, async () => {
+    const touched = await patchList($, tasks => {
+      const last = tasks.filter(x => x.owner === agentId).sort((x, y) => Number(x.id) - Number(y.id)).at(-1)
+      return last?.status === 'completed' ? [patchOf(last.id, { status: 'in_progress' })] : []
+    })
+    follow($, touched[0])
+  })
 
 // ---- subagents' isolation ----
 
@@ -476,7 +493,7 @@ export const register: Register = (on, options) => {
   // its instruction files are loaded afresh.
   on('session.end', async ($, e, next) => {
     const done = await next(e)
-    if (e.reason === 'resume' || e.reason === 'clear') forgetHandbacks()
+    if (e.reason === 'resume' || e.reason === 'clear') idByName.clear()
     if (e.reason === 'resume') {
       await update($, board, () => EMPTY)
       await stopBlink($)
@@ -512,15 +529,15 @@ export const register: Register = (on, options) => {
 
   // ---- subagents ----
 
-  // A resume keeps its row; `session.send` and the agent's next call restart it.
+  // A resume keeps its row; `session.send` and the agent's next call restart it. Its task
+  // reopens here, and again harmlessly at the send or the call, whichever the engine shows.
   on('agent.spawn', async ($, e, next) => {
     if (e.resume) {
       const resumed = await next(e)
-      // The new run's peer messages are not the old run's report, however the resume was addressed.
-      // A resume that lands before the old report's prompt.submit drops that report's note (accepted).
       if (resumed.deny === undefined) {
-        handingBack.delete(e.resume.agentId)
-        told.delete(e.resume.agentId)
+        const id = e.resume.agentId
+        await update($, agents, all => touch(all, id, ({ outcome: _outcome, ...a }) => a))
+        await reopen($, id).catch(ignore)
       }
       return resumed
     }
@@ -539,16 +556,23 @@ export const register: Register = (on, options) => {
       const fresh = newAgent(e, { model, isWorktree, cwd: await $.session.cwd(), startedAt })
       await update($, agents, all => keepLast({ ...all, [id]: fresh }))
       const { taskId } = taskMarkOf(e.description)
-      if (taskId !== undefined && (await claim($, taskId, id).catch(() => false))) {
-        await update($, agents, all => touch(all, id, a => ({ ...a, taskId })))
-      } else if (taskId === undefined) {
-        // No mark: drawn under the one task in progress, without claiming it.
-        // Behind queued task calls, on the restored list, so a start or a resume just before counts.
-        const sole = await serial($, async () => {
+      // A workflow's agent() or a teammate raises no `agent.report`, so a task it owned would never
+      // close: it neither claims nor gets one, and a `#N` only draws it under an open task N.
+      const isReporting = e.workflow === undefined && e.isTeammate !== true
+      if (taskId !== undefined && !isReporting) {
+        const isOpen = await serial($, async () => {
           await restore($).catch(ignore)
-          return soleLiveTask(own(await read($, board), await sessionId($)).tasks)
-        }).catch(() => undefined)
-        if (sole !== undefined) await update($, agents, all => touch(all, id, a => ({ ...a, taskId: sole })))
+          return own(await read($, board), await sessionId($)).tasks.some(x => x.id === taskId && x.status !== 'completed')
+        }).catch(() => false)
+        if (isOpen) await update($, agents, all => touch(all, id, a => ({ ...a, taskId })))
+      } else if (taskId !== undefined && (await claim($, taskId, id).catch(() => false))) {
+        await update($, agents, all => touch(all, id, a => ({ ...a, taskId })))
+      } else if (taskId === undefined && isReporting) {
+        // No mark: the agent gets a task of its own, in progress, with no model call.
+        const subject = e.description.trim() || e.subagentType
+        const made = await serial($, () => addTasks($, [{ subject, fields: { status: 'in_progress' } }], id)).catch((): PaneTask[] => [])
+        const mine = made[0]?.id
+        if (mine !== undefined) await update($, agents, all => touch(all, id, a => ({ ...a, taskId: mine })))
       }
     }
     return ran
@@ -574,7 +598,7 @@ export const register: Register = (on, options) => {
   })
 
   // Registered before the task tools' hooks, so it is outer: a subagent's task_create is
-  // its current call too, and a task tool's reminder passes through it untouched.
+  // its current call too.
   on('tool.call', async ($, e, next) => {
     const agentId = e.agentId
     // The spawn runs inside the Agent call, so its isolation is noted on the way down; a
@@ -582,7 +606,15 @@ export const register: Register = (on, options) => {
     if (e.tool === AGENT && e.isolation === 'worktree' && e.tool_use_id !== undefined) isolatedCalls.add(e.tool_use_id)
     if (agentId === undefined && e.tool === AGENT) {
       const ran = await next(e)
-      return agentHandback($, ran)
+      // A foreground hand-back, for a run whose `agent.report` never came (hooks off): one that
+      // came, failed or stopped included, already decided. A background launch (`async_launched`)
+      // completes at its report alone.
+      const r = ran.result as { status?: unknown; agentId?: unknown } | undefined
+      if (ran.deny === undefined && r?.status === 'completed' && typeof r.agentId === 'string') {
+        const id = r.agentId
+        if ((await read($, agents))[id]?.outcome === undefined) await finish($, id).catch(ignore)
+      }
+      return ran
     }
     if (agentId === undefined) {
       // A rule a read pulled in rides the next request: a scan after a call keeps the list near
@@ -597,15 +629,18 @@ export const register: Register = (on, options) => {
     const now = await $.clock.now()
     // Calls of one agent may run side by side: each is marked done by its own sequence number.
     let seq = 0
+    let isResumed = false
     await update($, agents, all =>
       // A call from a finished agent is a resume the send did not show (one addressed by name).
       touch(all, agentId, prev => {
+        isResumed = !prev.isRunning
         const a = prev.isRunning ? prev : restart(prev, now)
         seq = a.calls + 1
         const call: PaneCall = { seq, tool: String(e.tool), target: targetOf(e as Record<string, unknown>), isCalling: true }
         return { ...a, calls: seq, recent: [call, ...a.recent].slice(0, RECENT_KEPT) }
       }),
     )
+    if (isResumed) await reopen($, agentId).catch(ignore)
     const ran = await next(e)
     await update($, agents, all =>
       touch(all, agentId, a => ({ ...a, recent: a.recent.map(c => (c.seq === seq ? { ...c, isCalling: false } : c)) })),
@@ -613,35 +648,25 @@ export const register: Register = (on, options) => {
     return ran
   })
 
-  // Marked before the call runs: its report can reach the main loop before this hook resumes.
-  on('tool.call', { tool: HANDBACK }, async ($, e, next) => {
-    const agentId = e.agentId
-    if (agentId === undefined) return next(e)
-    handingBack.add(agentId)
-    try {
-      const ran = await next(e)
-      if (ran.deny !== undefined || ran.isError) handingBack.delete(agentId)
-      return ran
-    } catch (err) {
-      handingBack.delete(agentId)
-      throw err
-    }
+  // Each run that ends or is stopped reports here before its parent hears of it, foreground or
+  // background (claude-code.d.ts `agent.report`); the report itself passes on as it came.
+  on('agent.report', async ($, e, next) => {
+    const out = await next(e)
+    const outcome = e.status
+    await update($, agents, all => touch(all, e.agentId, a => ({ ...a, outcome }))).catch(ignore)
+    if (outcome === 'completed') await finish($, e.agentId).catch(ignore)
+    return out
   })
 
   // A message to a finished subagent resumes it from its transcript (SessionSendAddress):
-  // the same id and a new run; the `agent.spawn` it also fires (`e.resume`) is passed by.
+  // the same id and a new run. A send may address the agent by name.
   on('session.send', async ($, e, next) => {
     const sent = await next(e)
-    // A fallback for the drop in `agent.spawn`'s resume branch; a send may address the agent by name.
-    // A resume that lands before the old report's prompt.submit drops that report's note (accepted).
     const id = idByName.get(e.to) ?? e.to
     if (sent.isDelivered && (await read($, agents))[id]?.isRunning === false) {
-      handingBack.delete(id)
-      told.delete(id)
-    }
-    if (sent.isDelivered && (await read($, agents))[e.to]?.isRunning === false) {
       const now = await $.clock.now()
-      await update($, agents, all => touch(all, e.to, a => (a.isRunning ? a : restart(a, now))))
+      await update($, agents, all => touch(all, id, a => (a.isRunning ? a : restart(a, now))))
+      await reopen($, id).catch(ignore)
     }
     return sent
   })
@@ -663,29 +688,6 @@ export const register: Register = (on, options) => {
     return done
   })
 
-  // A background agent's report reaches the main loop as a prompt of its own and carries the
-  // reminder in its `context`, the text left as it came. As a task notification, the owners its
-  // text names are handed back, and another notification (a background command) gets the open
-  // list alone. As a peer prompt (`<agent-message from="…">`, after the agent's SubagentHandback
-  // call), only the sender is: the report body may name other agents, and a peer prompt from an
-  // agent that has not handed back, or in another envelope, gets nothing.
-  on('prompt.submit', async ($, e, next) => {
-    const kind = e.origin.kind as string
-    if (kind === 'task-notification') {
-      // A report told this way leaves no hand-back waiting for a peer prompt.
-      for (const id of [...handingBack]) if (namesId(e.text, id)) handingBack.delete(id)
-      const tasks = await currentTasks($).catch(() => [])
-      const line = handbackText(tasks, ownersIn(tasks, e.text))
-      return next(line === undefined ? e : { ...e, context: [...(e.context ?? []), line] })
-    }
-    const sender = kind === 'peer' || kind === 'peer-send-message' ? ENVELOPE.exec(e.text)?.[1] : undefined
-    const id = sender === undefined ? undefined : (idByName.get(sender) ?? sender)
-    if (id === undefined || !handingBack.delete(id)) return next(e)
-    told.add(id)
-    const line = handbackText(await currentTasks($).catch(() => []), [id])
-    return next(line === undefined ? e : { ...e, context: [...(e.context ?? []), line] })
-  })
-
   // ---- the task tools ----
 
   // A subagent's call lands in the same list: the CLI keeps one list per session too.
@@ -694,7 +696,7 @@ export const register: Register = (on, options) => {
   on('tool.call', { tool: CREATE }, async ($, e, next) => serial($, taskBody(next, e.tool_use_id, async () => {
     const entries: unknown[] = Array.isArray(e.tasks) ? e.tasks : [e]
     if (entries.length === 0) return { deny: 'task_create needs a subject, or a non-empty tasks list.' }
-    const items: { subject: string; fields: Record<string, unknown> }[] = []
+    const items: NewItem[] = []
     for (const raw of entries) {
       const c = (raw ?? {}) as Record<string, unknown>
       const subject = str(c.subject)
@@ -704,32 +706,10 @@ export const register: Register = (on, options) => {
       }
       items.push({ subject, fields: c })
     }
-    await restore($).catch(ignore)
-    const sid = await sessionId($)
-    // Another process of the same session may have minted ids since this one loaded.
-    const stored = (sid === undefined ? undefined : await storedBoard($, sid))?.lastId ?? 0
-    const seen = { wasIdle: false }
-    const local = await update($, board, b => {
-      const cur = own(b, sid)
-      const first = Math.max(cur.lastId, stored, ...cur.tasks.map(x => Number(x.id))) + 1
-      const made = items.map((it, i) => newTask(first + i, it.subject, it.fields))
-      seen.wasIdle = cur.tasks.every(x => x.status === 'completed')
-      return { sessionId: cur.sessionId, lastId: first + items.length - 1, tasks: [...cur.tasks, ...made] }
-    })
-    const made = local.tasks.slice(-items.length)
-    const written = await persist($, local, { write: made })
-    // The first task of a list reopens the pane; one the person closed mid-list stays
-    // closed until the next list. /pane toggles it any time. The tab the person picked
-    // stays put: the Task tab redraws from the board whether it is shown or not.
-    if (seen.wasIdle && isInteractive) await openPane($).catch(ignore)
-    await syncBlink($).catch(ignore)
-    follow($, made.filter(x => x.status === 'in_progress').at(-1)?.id)
+    const made = await addTasks($, items)
     await remember($, e.tool_use_id, createLines(made))
     // JSON, so a REPL script reads the ids it made; the transcript row shows `remember`'s lines.
-    return {
-      result: JSON.stringify({ created: made.map(x => ({ id: x.id, subject: x.subject })) }),
-      ...remind(e.agentId, written.tasks, true),
-    }
+    return { result: JSON.stringify({ created: made.map(x => ({ id: x.id, subject: x.subject })) }) }
   }))).catch(failedOrQueued)
 
   // One task by the top-level fields, or several as `updates`, applied in order in one
@@ -785,11 +765,9 @@ export const register: Register = (on, options) => {
       result: done.results
         .map(r => `Updated task #${r.id} ${r.fields.length > 0 ? r.fields.join(', ') : '(no changes)'}`)
         .join('\n'),
-      ...remind(e.agentId, written.tasks),
     }
   }))).catch(failedOrQueued)
 
-  // No reminder here: the result already is the whole list, statuses and owners included.
   on('tool.call', { tool: LIST }, async ($, e, next) => serial($, taskBody(next, e.tool_use_id, async () => {
     await restore($).catch(ignore)
     const b = own(await read($, board), await sessionId($))

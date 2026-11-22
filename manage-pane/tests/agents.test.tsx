@@ -69,11 +69,12 @@ test('a subagent’s task_create is its current call and lands in the one list',
   expect(await ui.find({ type: 'Text', text: '  · manage-pane:task_create from a1' })).toBeDefined()
 })
 
+// `#9` names no task: the spawn neither claims one nor gets its own, so its agent is unclaimed.
 test('an agent no task claims is drawn under Other: running as a block, finished as one dim line', async ($, on) => {
   const clock = agentStub(on)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Some task', description: 'd' })
-  await $.agent.spawn({ prompt: 'p', subagentType: 'checker', description: 'Review the diff' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'checker', description: '#9 Review the diff' })
   let ui = await mountPane($)
   expect(await ui.find({ type: 'Text', text: 'Some task' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Other' })).toBeDefined()
@@ -95,11 +96,11 @@ test('only the 3 newest finished unclaimed agents are drawn, running ones first;
   await $.tool.call({ tool: CREATE, subject: 'Done', description: 'd' })
   await $.tool.call({ tool: UPDATE, taskId: '1', status: 'completed' })
   for (const type of ['t1', 't2', 't3', 't4']) {
-    await $.agent.spawn({ prompt: 'p', subagentType: type, description: type })
+    await $.agent.spawn({ prompt: 'p', subagentType: type, description: `#9 ${type}` })
     await clock.advance(1_000)
     await $.turn.complete(done(`a${['t1', 't2', 't3', 't4'].indexOf(type) + 1}`))
   }
-  await $.agent.spawn({ prompt: 'p', subagentType: 'live', description: 'Still going' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'live', description: '#9 Still going' })
   const ui = await mountPane($)
   expect(await ui.find({ type: 'Text', text: /^  └ ✓ t1/ })).toBeUndefined()
   for (const type of ['t2', 't3', 't4']) expect(await ui.find({ type: 'Text', text: new RegExp(`^  └ ✓ ${type}`) })).toBeDefined()
@@ -117,7 +118,7 @@ test('[open] with only finished unclaimed agents drops the Other heading', async
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Done', description: 'd' })
   await $.tool.call({ tool: UPDATE, taskId: '1', status: 'completed' })
-  await $.agent.spawn({ prompt: 'p', subagentType: 'checker', description: 'Review' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'checker', description: '#9 Review' })
   await clock.advance(1_000)
   await $.turn.complete(done('a1'))
   const ui = await mountPane($)
@@ -137,7 +138,7 @@ test('with every agent claimed there is no Other heading', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: 'Other' })).toBeUndefined()
 })
 
-test('an Agent call without #N goes through and its agent is drawn under Other', async ($, on) => {
+test('an Agent call without #N goes through and its agent is drawn under the task made for it', async ($, on) => {
   agentStub(on)
   const seen = agentTool(on)
   await $.session.start(START)
@@ -146,16 +147,17 @@ test('an Agent call without #N goes through and its agent is drawn under Other',
   expect(seen.ran).toBe(1)
   await spawn($, 'Review the diff')
   const ui = await mountPane($)
-  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeDefined()
-  expect(await ui.find({ key: 'pane-agent:a1' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Review the diff' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-owned:a1' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeUndefined()
 })
 
 test('an owned running agent is drawn under its task once; an unowned one under Other', async ($, on) => {
   agentStub(on)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Owned work', description: 'd' })
-  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Does the owned work' })
-  await $.agent.spawn({ prompt: 'p', subagentType: 'checker', description: 'Free agent' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#9 Does the owned work' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'checker', description: '#9 Free agent' })
   await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
   await $.tool.call({ tool: 'Bash', command: 'make', agentId: 'a1' })
 
@@ -182,7 +184,7 @@ test('a spawn whose description opens with #N claims task N: owner, in progress,
   expect(await ui.find({ type: 'Text', text: /Trace the flow/ })).toBeUndefined()
 })
 
-test('a #N naming no task, a completed one, or no mark at all claims nothing', async ($, on) => {
+test('a #N naming no task or a completed one claims nothing; a # past the start is no mark and gets its own task', async ($, on) => {
   agentStub(on)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Done', description: 'd' })
@@ -190,20 +192,19 @@ test('a #N naming no task, a completed one, or no mark at all claims nothing', a
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#1 Stale number' })
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#9 Unknown' })
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Fix #1 later' })
-  expect(said(await $.tool.call({ tool: LIST }))).toBe('No open tasks (1 completed).')
+  expect(said(await $.tool.call({ tool: LIST }))).toBe('#2 [in_progress] Fix #1 later (owner: a3)\n(1 completed, not listed)')
 })
 
-test('an owned agent that finished is one dim line under its task, and its task is left as it was', async ($, on) => {
+test('an owned agent whose turn ended is one dim line under its task, and its task is left as it was', async ($, on) => {
   const clock = agentStub(on)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Owned work', description: 'd' })
-  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Does the owned work' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#1 Does the owned work' })
   await step($, 'a1', 'medium')
-  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
   await clock.advance(192_000)
   await $.turn.complete(done('a1'))
 
-  // Completion is the caller's call: the owned agent's end changes neither status nor owner.
+  // Only the run's report completes a task: a turn's end changes neither status nor owner.
   expect(said(await $.tool.call({ tool: LIST }))).toBe('#1 [in_progress] Owned work (owner: a1)')
   const ui = await mountPane($)
   // Who ran, on what model and effort, for how long.
@@ -364,7 +365,8 @@ test('an agent’s effort and model are what its requests carried, never a defin
   agentStub(on)
   const head = async () => {
     const ui = await mountRows($, 40)
-    const text = (await ui.find({ type: 'Text', text: /^◐ / }))?.text
+    // The agent's head row, not its task's `◐ #1 Work` above it.
+    const text = (await ui.find({ type: 'Text', text: /^◐ explorer/ }))?.text
     await ui.unmount()
     return text
   }
@@ -443,9 +445,8 @@ test('a resumed agent runs again under its new task; the completed task keeps it
   const json = (id: string) => out.json?.('sid-1', id)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'First', description: 'd' })
-  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Work' } as never)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#1 Work' } as never)
   await step($, 'a1', 'medium')
-  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
   await clock.advance(274_000)
   await $.turn.complete(done('a1'))
   await $.tool.call({ tool: UPDATE, taskId: '1', status: 'completed' })
@@ -518,8 +519,7 @@ test('a running agent whose only task is completed with its frozen run is drawn 
   agentStub(on)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Build', description: 'd' })
-  await spawn($, 'Build it')
-  await $.tool.call({ tool: UPDATE, taskId: '1', status: 'in_progress', owner: 'a1' })
+  await spawn($, '#1 Build it')
   await $.tool.call({ tool: UPDATE, taskId: '1', status: 'completed' })
   // a1 still runs (a resume by SendMessage looks the same) and holds only the frozen run.
   const ui = await mountPane($)
@@ -542,7 +542,7 @@ test('an agent whose claimed task was deleted is drawn under Other', async ($, o
 test('Other at the 44-column dock: a long type and a directory leave no row wider than 44 cells', async ($, on) => {
   agentStub(on)
   await $.session.start(START)
-  await $.agent.spawn({ prompt: 'p', subagentType: 'a-very-long-subagent-type-name', description: 'x'.repeat(80), cwd: '/a/b/c/dddddddddddd' } as never)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'a-very-long-subagent-type-name', description: `#9 ${'x'.repeat(80)}`, cwd: '/a/b/c/dddddddddddd' } as never)
   const ui = await mountRows($, 40, 44)
   expect(await ui.find({ type: 'Text', text: 'Other' })).toBeDefined()
   // The head row is what this layout cuts to fit; the description row is truncated by the renderer.
@@ -556,7 +556,7 @@ test('an owner given as the 8-character id an Agent result shows is stored as th
   agentStub(on, out, { agentId: () => 'abc2ea9c-1111-2222-3333-444455556666' })
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Build', description: 'd' })
-  await spawn($, 'Build it')
+  await spawn($, '#9 Build it')
   await $.tool.call({ tool: UPDATE, taskId: '1', owner: 'abc2ea9c' })
   expect(out.json?.('sid-1', '1')).toMatchObject({ owner: 'abc2ea9c-1111-2222-3333-444455556666' })
   const ui = await mountPane($)
@@ -596,8 +596,8 @@ test('an owner prefix that matches several agents is refused and changes nothing
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, subject: 'Build', description: 'd' })
   await $.tool.call({ tool: CREATE, subject: 'Other', description: 'd' })
-  await spawn($, 'One')
-  await spawn($, 'Two')
+  await spawn($, '#9 One')
+  await spawn($, '#9 Two')
   const r = await $.tool.call({ tool: UPDATE, updates: [{ taskId: '2', subject: 'Renamed' }, { taskId: '1', owner: 'abc2ea9c' }] })
   expect(r.deny).toBe('owner "abc2ea9c" matches 2 agents; give more of the id.')
   expect(await listOf($)).not.toContain('Renamed')
@@ -627,44 +627,4 @@ test('a subagent’s REPL script is no call row of its own; the calls it makes a
   expect(repl.midCall).toEqual(['  · Bash make'])
   ui = await mountPane($)
   expect((await ui.findAll({ type: 'Text', text: /^  [·▸] \S/ })).map(c => c.text)).toEqual(['  · Bash make'])
-})
-
-
-test('an Agent with no #N while exactly one task is in progress is drawn under that task, unclaimed', async ($, on) => {
-  agentStub(on)
-  await $.session.start(START)
-  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'Review' , status: 'in_progress' }, { subject: 'Later' }] })
-  await spawn($, 'Review the diff')
-  await spawn($, 'Second reviewer')
-  const ui = await mountPane($)
-  expect(await ui.find({ key: 'pane-owned:a1' })).toBeDefined()
-  expect(await ui.find({ key: 'pane-owned:a2' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeUndefined()
-  // Drawn, not claimed: the task keeps no owner.
-  expect(said(await $.tool.call({ tool: LIST }))).not.toMatch(/owner/)
-})
-
-test('an Agent with no #N while two tasks are in progress, or none, is drawn under Other', async ($, on) => {
-  agentStub(on)
-  await $.session.start(START)
-  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'A' }, { subject: 'B' }] })
-  await spawn($, 'No task live')
-  await $.tool.call({ tool: UPDATE, updates: [{ taskId: '1', status: 'in_progress' }, { taskId: '2', status: 'in_progress' }] })
-  await spawn($, 'Two tasks live')
-  const ui = await mountPane($)
-  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeDefined()
-  expect(await ui.find({ key: 'pane-agent:a1' })).toBeDefined()
-  expect(await ui.find({ key: 'pane-agent:a2' })).toBeDefined()
-  expect(await ui.find({ key: 'pane-owned:a2' })).toBeUndefined()
-})
-
-test('an unmarked agent drawn under the in-progress task, then made owner of another, is drawn once', async ($, on) => {
-  agentStub(on)
-  await $.session.start(START)
-  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'Impl', status: 'in_progress' }, { subject: 'Review' }] })
-  await spawn($, 'Reviewer')
-  await $.tool.call({ tool: UPDATE, taskId: '2', owner: 'a1', status: 'in_progress' })
-  const ui = await mountPane($)
-  expect(await ui.findAll({ key: 'pane-owned:a1' })).toHaveLength(1)
-  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeUndefined()
 })

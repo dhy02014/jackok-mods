@@ -180,6 +180,7 @@ export const agentStub = (
         : { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, model: o.answeredBy ?? e.model }
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn', usage } as never
   })
+  on('agent.report', ($, e) => ({ text: e.text }))
   on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
   on('tool.call', { tool: 'Read' }, () => ({ result: { type: 'text', file: { filePath: '', content: '', numLines: 0, startLine: 1, totalLines: 0 } } }) as never)
   out.files = s.files
@@ -228,6 +229,10 @@ export const agentCall = ($: Fire, description: string, agentId?: string) =>
   $.tool.call({ tool: 'Agent', prompt: 'p', description, subagent_type: 'checker', ...(agentId !== undefined ? { agentId } : {}) } as never)
 
 export const spawn = ($: Fire, description: string) => $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description } as never)
+
+// The end of an agent's run as the engine reports it, foreground or background.
+export const report = ($: Fire, agentId: string, status: 'completed' | 'failed' | 'stopped' = 'completed') =>
+  $.agent.report({ agentId, subagentType: 'explorer', provider: { plugin: 'engine', tier: 'core' }, status, text: 'r' } as never)
 
 // One model request of a subagent (`agentId`) or of the main loop (undefined), not yet read.
 export const stepOpen = ($: Fire, agentId: string | undefined, effort?: string, model = 'claude-sonnet-5-5') =>

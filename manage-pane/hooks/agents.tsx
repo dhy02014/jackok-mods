@@ -85,9 +85,9 @@ const finishLabel = (r: PaneOwnerRun) => {
   return ['✓', r.type, run, elapsed(r.ms)].filter(s => s !== undefined).join(' ')
 }
 
-// A resume is a new run of the same record: a fresh clock and no calls yet.
+// A resume is a new run of the same record: a fresh clock, no calls and no outcome yet.
 export const restart = (a: PaneAgent, now: number): PaneAgent => {
-  const { endedAt: _ended, ...rest } = a
+  const { endedAt: _ended, outcome: _outcome, ...rest } = a
   return { ...rest, isRunning: true, startedAt: now, recent: [] }
 }
 
@@ -157,8 +157,8 @@ export const agentBlock = ({ Box, Text }: Draw, t: Strings, id: string, a: PaneA
 
 // What a task's owner adds under the task line: the owner's running block, its finish
 // time once done, or its short id when this load never saw it spawn (a reload, a resume).
-// A completed task's `frozen` run wins over the live record. The owner is the caller's
-// to set and clear; nothing here guesses or completes one.
+// A completed task's `frozen` run wins over the live record; a resume reopens the task and
+// thaws it. Owners are set and tasks completed in ./register.tsx, never here.
 export const ownerTree = (
   draw: Draw,
   t: Strings,
@@ -271,16 +271,29 @@ export const taskMarkOf = (description: string): { taskId?: string; rest: string
   return m === null ? { rest: description } : { taskId: m[1]!, rest: m[2]! }
 }
 
-// The task an Agent with no `#N` mark is drawn under: the one task in progress, when there
-// is exactly one; none with zero or several, so a guess never lands on the wrong task.
-export const soleLiveTask = (tasks: readonly PaneTask[]) => {
-  const live = tasks.filter(x => x.status === 'in_progress')
-  return live.length === 1 ? live[0]!.id : undefined
-}
-
 // The running agent other than `agentId` that owns `task`, which a claim must leave alone.
 export const busyOwner = (task: PaneTask, all: Readonly<Record<string, PaneAgent>>, agentId?: string) =>
-  task.owner !== undefined && task.owner !== agentId && all[task.owner]?.isRunning === true ? task.owner : undefined
+  task.owner !== undefined && task.owner !== agentId && all[task.owner] !== undefined && isLiveRun(all[task.owner]!) ? task.owner : undefined
+
+// Whether the agent's current run is still going: an outcome means its report came, even before
+// its turn.complete clears `isRunning`.
+export const isLiveRun = (a: PaneAgent) => a.outcome === undefined && a.isRunning
+
+// The open tasks `agentId`'s completed run closes: each it owns or its spawn named, once no other
+// agent on it still runs, and its owner, if another, did not end failed or stopped. A non-owner
+// that failed holds nothing up, so a fresh agent that claimed the task after it can close it. An
+// agent this load never saw holds nothing up.
+export const tasksDone = (tasks: readonly PaneTask[], all: Readonly<Record<string, PaneAgent>>, agentId: string) => {
+  const named = all[agentId]?.taskId
+  const blocks = (t: PaneTask, id: string, a: PaneAgent) =>
+    isLiveRun(a) || (t.owner === id && a.outcome !== undefined && a.outcome !== 'completed')
+  return tasks.filter(
+    t =>
+      t.status !== 'completed' &&
+      (t.owner === agentId || t.id === named) &&
+      !Object.entries(all).some(([id, a]) => id !== agentId && (a.taskId === t.id || t.owner === id) && blocks(t, id, a)),
+  )
+}
 
 // A spawned agent as the pane first shows it; `cwd` is the session's, `e.cwd` relative to it.
 export const newAgent = (

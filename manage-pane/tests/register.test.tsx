@@ -1,6 +1,205 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { START, HOME, CREATE, UPDATE, LIST, stub, mountPane, said, created, SID2_BOARD, done, instructionStub, reminder, rows } from './helpers'
+import { START, HOME, CREATE, UPDATE, LIST, stub, mountPane, said, created, SID2_BOARD, done, instructionStub, reminder, rows, agentStub, spawn, step, report, listOf, AGENT_DONE } from './helpers'
 import type { StoredBoard } from './helpers'
+
+// ---- a subagent's task, driven by the engine's events alone ----
+
+test('an Agent dispatch with no #N gets a task of its own: in progress, owned by the agent, stored, drawn under it', async ($, on) => {
+  const out: Parameters<typeof agentStub>[1] = {}
+  agentStub(on, out)
+  await $.session.start(START)
+  await spawn($, '  Review the diff  ')
+  expect(await listOf($)).toBe('#1 [in_progress] Review the diff (owner: a1)')
+  expect(out.json?.('sid-1', '1')).toMatchObject({ subject: 'Review the diff', status: 'in_progress', owner: 'a1' })
+  const ui = await mountPane($)
+  expect(await ui.find({ key: 'pane-owned:a1' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeUndefined()
+})
+
+test('dispatches and a task_create fired side by side each get their own id; no write is lost', async ($, on) => {
+  const out: Parameters<typeof agentStub>[1] = {}
+  agentStub(on, out)
+  await $.session.start(START)
+  await Promise.all([spawn($, 'Alpha'), spawn($, 'Beta'), $.tool.call({ tool: CREATE, subject: 'Inline' })])
+  const list = await listOf($)
+  expect(list.split('\n')).toHaveLength(3)
+  expect(list).toMatch(/\[in_progress\] Alpha \(owner: a\d\)/)
+  expect(list).toMatch(/\[in_progress\] Beta \(owner: a\d\)/)
+  expect(list).toMatch(/\[pending\] Inline$/m)
+  expect(new Set(['1', '2', '3'].map(id => out.json?.('sid-1', id)?.subject))).toEqual(new Set(['Alpha', 'Beta', 'Inline']))
+})
+
+test('a completed report completes the agent’s task with its run frozen; a failed or stopped one leaves it open', async ($, on) => {
+  const out: Parameters<typeof agentStub>[1] = {}
+  const clock = agentStub(on, out)
+  await $.session.start(START)
+  await spawn($, 'Works')
+  await spawn($, 'Fails')
+  await spawn($, 'Stopped')
+  await step($, 'a1', 'medium')
+  await clock.advance(5_000)
+  await report($, 'a1')
+  await report($, 'a2', 'failed')
+  await report($, 'a3', 'stopped')
+  expect(await listOf($)).toBe('#2 [in_progress] Fails (owner: a2)\n#3 [in_progress] Stopped (owner: a3)\n(1 completed, not listed)')
+  expect(out.json?.('sid-1', '1')).toMatchObject({ status: 'completed', ownerRun: { type: 'explorer', ms: 5_000, effort: 'medium' } })
+})
+
+test('a foreground Agent result that completed completes the task too; a background launch waits for its report', async ($, on) => {
+  agentStub(on)
+  let answer: unknown = AGENT_DONE
+  on('tool.call', { tool: 'Agent' }, () => ({ result: answer }) as never)
+  await $.session.start(START)
+  await spawn($, 'Foreground')
+  await $.tool.call({ tool: 'Agent', prompt: 'p', description: 'Foreground', subagent_type: 'explorer' } as never)
+  expect(await listOf($)).toBe('No open tasks (1 completed).')
+  await spawn($, 'Background')
+  answer = { status: 'async_launched', agentId: 'a2', description: 'Background', prompt: 'p', outputFile: '/o' }
+  await $.tool.call({ tool: 'Agent', prompt: 'p', description: 'Background', subagent_type: 'explorer' } as never)
+  expect(await listOf($)).toBe('#2 [in_progress] Background (owner: a2)\n(1 completed, not listed)')
+  await report($, 'a2')
+  expect(await listOf($)).toBe('No open tasks (2 completed).')
+})
+
+test('a resume reopens the agent’s completed task, thawing its run, and the next report completes it again', async ($, on) => {
+  const out: Parameters<typeof agentStub>[1] = {}
+  agentStub(on, out)
+  on('session.send', () => ({ isDelivered: true as const }))
+  await $.session.start(START)
+  await spawn($, 'Work')
+  await report($, 'a1')
+  await $.turn.complete(done('a1'))
+  expect(out.json?.('sid-1', '1')).toMatchObject({ status: 'completed', ownerRun: { type: 'explorer' } })
+  // By SendMessage.
+  await $.session.send({ to: 'a1', text: 'more' } as never)
+  expect(await listOf($)).toBe('#1 [in_progress] Work (owner: a1)')
+  expect(out.json?.('sid-1', '1')).not.toHaveProperty('ownerRun')
+  let ui = await mountPane($)
+  expect(await ui.find({ key: 'pane-agent:a1' })).toBeDefined()
+  await ui.unmount()
+  await report($, 'a1')
+  expect(await listOf($)).toBe('No open tasks (1 completed).')
+  // By the resume's spawn alone, and by a call from the finished agent.
+  await $.agent.spawn({ prompt: 'again', subagentType: 'explorer', description: '', resume: { agentId: 'a1' } } as never)
+  expect(await listOf($)).toBe('#1 [in_progress] Work (owner: a1)')
+  await report($, 'a1')
+  await $.turn.complete(done('a1'))
+  await $.tool.call({ tool: 'Bash', command: 'make', agentId: 'a1' } as never)
+  expect(await listOf($)).toBe('#1 [in_progress] Work (owner: a1)')
+  // No new task was made for any resume.
+  ui = await mountPane($)
+  expect((await ui.findAll({ type: 'Text', text: /^#\d+ $/ })).map(t => t.text)).toEqual(['#1 '])
+})
+
+test('a #N dispatch still claims the pre-made task and makes none of its own; its report completes it', async ($, on) => {
+  agentStub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'Plan' }, { subject: 'Build' }] })
+  await spawn($, '#2 Build it')
+  expect(await listOf($)).toBe('#1 [pending] Plan\n#2 [in_progress] Build (owner: a1)')
+  await report($, 'a1')
+  expect(await listOf($)).toBe('#1 [pending] Plan\n(1 completed, not listed)')
+})
+
+test('a workflow agent() or a teammate gets no task of its own: neither reports, so it would never close', async ($, on) => {
+  agentStub(on)
+  await $.session.start(START)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Flow step', workflow: { runId: 'wf_1', agentIndex: 1 } } as never)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'teammate', description: 'Mate', isTeammate: true } as never)
+  expect(await listOf($)).toBe('No tasks found.')
+  // Both still show as agents, under Other.
+  const ui = await mountPane($)
+  expect(await ui.find({ key: 'pane-agent:a1' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-agent:a2' })).toBeDefined()
+})
+
+test('a workflow agent() or a teammate whose description names #N never claims it; it is drawn under the task', async ($, on) => {
+  agentStub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'Plan' }, { subject: 'Build' }] })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#1 Flow step', workflow: { runId: 'wf_1', agentIndex: 1 } } as never)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'teammate', description: '#2 Mate', isTeammate: true } as never)
+  expect(await listOf($)).toBe('#1 [pending] Plan\n#2 [pending] Build')
+  const ui = await mountPane($)
+  expect(await ui.find({ key: 'pane-owned:a1' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-owned:a2' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Other' })).toBeUndefined()
+})
+
+test('a retry closes the task: the first agent on #N failed, a fresh one claims #N and completes', async ($, on) => {
+  agentStub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'Build' })
+  await spawn($, '#1 First try')
+  await report($, 'a1', 'failed')
+  // Even before a1's turn.complete: its report ended the run, so the claim goes through.
+  await spawn($, '#1 Retry')
+  expect(await listOf($)).toBe('#1 [in_progress] Build (owner: a2)')
+  await report($, 'a2')
+  expect(await listOf($)).toBe('No open tasks (1 completed).')
+})
+
+test('a #N task two agents work completes at the last one’s completed report, whoever owns it', async ($, on) => {
+  agentStub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'Build' })
+  await spawn($, '#1 First')
+  await spawn($, '#1 Second')
+  // The owner's report alone leaves it open: a2 still works it.
+  await report($, 'a1')
+  expect(await listOf($)).toBe('#1 [in_progress] Build (owner: a1)')
+  await report($, 'a2')
+  expect(await listOf($)).toBe('No open tasks (1 completed).')
+})
+
+test('a #N task stays open when the other agent on it failed; the non-owner’s report completes it once the owner completed', async ($, on) => {
+  agentStub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, tasks: [{ subject: 'A' }, { subject: 'B' }] })
+  await spawn($, '#1 First')
+  await spawn($, '#1 Second')
+  await report($, 'a1', 'failed')
+  await report($, 'a2')
+  expect(await listOf($)).toContain('#1 [in_progress] A (owner: a1)')
+  await spawn($, '#2 Third')
+  await spawn($, '#2 Fourth')
+  await report($, 'a3')
+  await report($, 'a4')
+  expect(await listOf($)).toBe('#1 [in_progress] A (owner: a1)\n(1 completed, not listed)')
+})
+
+test('a failed or stopped report is not overridden by the foreground Agent result that follows it', async ($, on) => {
+  agentStub(on)
+  let answer: { agentId: string } = { ...AGENT_DONE }
+  on('tool.call', { tool: 'Agent' }, () => ({ result: answer }) as never)
+  await $.session.start(START)
+  await spawn($, 'Fails')
+  await report($, 'a1', 'failed')
+  await $.tool.call({ tool: 'Agent', prompt: 'p', description: 'Fails', subagent_type: 'explorer' } as never)
+  await spawn($, 'Stops')
+  await report($, 'a2', 'stopped')
+  answer = { ...AGENT_DONE, agentId: 'a2' }
+  await $.tool.call({ tool: 'Agent', prompt: 'p', description: 'Stops', subagent_type: 'explorer' } as never)
+  expect(await listOf($)).toBe('#1 [in_progress] Fails (owner: a1)\n#2 [in_progress] Stops (owner: a2)')
+})
+
+test('a SendMessage to a named agent reopens its task; after /clear the name resumes nothing', async ($, on) => {
+  agentStub(on)
+  on('session.send', () => ({ isDelivered: true as const }))
+  await $.session.start(START)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: 'Scout ahead', name: 'scout' } as never)
+  await report($, 'a1')
+  await $.turn.complete(done('a1'))
+  expect(await listOf($)).toBe('No open tasks (1 completed).')
+  await $.session.send({ to: 'scout', text: 'more' } as never)
+  expect(await listOf($)).toBe('#1 [in_progress] Scout ahead (owner: a1)')
+  await report($, 'a1')
+  await $.turn.complete(done('a1'))
+  await $.session.end({ reason: 'clear', sessionId: 'sid-1', resume: {} as never })
+  await $.session.send({ to: 'scout', text: 'again' } as never)
+  // The stub keeps the id across /clear, so the stored list comes back: still completed, not reopened.
+  expect(await listOf($)).toBe('No open tasks (1 completed).')
+})
 
 test('built-in tool descriptions stay as they are; task_create teaches the `#N` claim and replaces the built-in task tools', async ($, on) => {
   const { specText } = stub(on)
@@ -47,12 +246,13 @@ test('the three tools are registered in front with the built-ins’ required fie
     { name: 'task_create', isDeferred: false, required: undefined },
     // taskId is required per entry: a call carries it at the top level or in each of `updates`.
     { name: 'task_update', isDeferred: false, required: undefined },
-    // Deferred: the open-task reminder covers it outside a compaction.
+    // Deferred: the pane shows the list; the model needs it only after a compaction.
     { name: 'task_list', isDeferred: true, required: undefined },
   ])
   // Descriptions plus schemas stay small: `updates` and `tasks` cost ~100 characters each
-  // once and save a whole tool call per batched update or create; the result's JSON shape ~45.
-  expect(specText.join('').length).toBeLessThan(1100)
+  // once and save a whole tool call per batched update or create; the result's JSON shape ~45;
+  // the line that Agent dispatches are tracked automatically ~90.
+  expect(specText.join('').length).toBeLessThan(1170)
   // The spec teaches the `#N` claim.
   expect(specText.join('')).toContain('starting `#3 ` claims task 3')
 })
