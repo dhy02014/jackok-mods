@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { failureText, HOOK_LIMIT_MS, isOutOfTime, QUEUE_MARGIN_MS, QUEUED_TOO_LONG, rowsBelow, ruleParts, treeRows } from '../hooks/pane'
+import { failureText, HOOK_LIMIT_MS, isOutOfTime, QUEUE_MARGIN_MS, QUEUED_TOO_LONG, clampOffset, revealOffset, rowOfKey, rowsBelow, ruleParts, sliceRows, treeRows, windowed } from '../hooks/pane'
 import { START, CREATE, UPDATE, LIST, PANE_PROPS, stub, mountPane, contextOf, AGENT_DONE, instructionStub, opening, rows, said } from './helpers'
 
 test('no task call, Agent result or report prompt carries a task reminder: the pane is the list', async ($, on) => {
@@ -107,41 +107,78 @@ test('the top row switches between the Task and Prompt tabs; task changes keep t
   expect(await ui.find({ type: 'Text', text: 'Next list' })).toBeDefined()
 })
 
+const txt = (key?: string) => ({ type: 'Text', props: key === undefined ? {} : { key }, children: ['a'] })
+const col = (...c: unknown[]) => ({ type: 'Box', props: { flexDirection: 'column' }, children: c })
+const keyed = (key: string, ...c: unknown[]) => ({ type: 'Box', props: { key, flexDirection: 'column' }, children: c })
+const row = (...c: unknown[]) => ({ type: 'Box', children: c })
+
 test('rows are counted as the terminal stacks them: column Boxes add, row Boxes take the tallest', () => {
-  const text = { type: 'Text', children: ['a'] }
-  const col = (...c: unknown[]) => ({ type: 'Box', props: { flexDirection: 'column' }, children: c })
-  const row = (...c: unknown[]) => ({ type: 'Box', children: c })
-  expect(treeRows(col(text, text, row(text, col(text, text))))).toBe(4)
-  expect(treeRows(col(text, [text, [text]], undefined, false, ''))).toBe(3)
-  expect(treeRows({ type: 'Box', props: { flexDirection: 'column', marginTop: 1 }, children: [text] })).toBe(2)
-  expect(treeRows({ type: 'Box', props: { display: 'none' }, children: [text] })).toBe(0)
+  expect(treeRows(col(txt(), txt(), row(txt(), col(txt(), txt()))))).toBe(4)
+  expect(treeRows(col(txt(), [txt(), [txt()]], undefined, false, ''))).toBe(3)
+  expect(treeRows({ type: 'Box', props: { flexDirection: 'column', marginTop: 1 }, children: [txt()] })).toBe(2)
+  expect(treeRows({ type: 'Box', props: { display: 'none' }, children: [txt()] })).toBe(0)
   expect(rowsBelow(12, { offset: 0, bodyRows: 5 })).toBe(7)
-  expect(rowsBelow(12, { offset: 7, bodyRows: 5 })).toBe(0)
   expect(rowsBelow(3, { offset: 0, bodyRows: 30 })).toBe(0)
 })
 
-test('the header rule stays its full width with or without the count, and drops the count when too narrow', () => {
-  for (const below of [0, 7, 120]) {
-    const r = ruleParts(44, below)
-    expect((r.head + r.label + r.tail).length).toBe(44)
-  }
-  expect(ruleParts(44, 7).label).toBe(' 7 more below ')
-  expect(ruleParts(10, 7)).toEqual({ head: '─'.repeat(10), label: '', tail: '' })
+test('a slice keeps the rows in range, cutting into nested columns, and finds a keyed block’s rows', () => {
+  const tree = col(keyed('t1', txt('a'), txt('b')), keyed('t2', txt('c'), txt('d'), txt('e')), txt('f'))
+  const cut = sliceRows(tree, 1, 3) as { children: { props: { key?: string }; children: unknown[] }[] }
+  expect(treeRows(cut)).toBe(3)
+  expect(cut.children.map(c => c.props.key)).toEqual(['t1', 't2'])
+  expect(cut.children[0]!.children).toHaveLength(1)
+  expect(sliceRows(tree, 0, 99)).toBe(tree)
+  expect(sliceRows(tree, 6, 3)).toBeUndefined()
+  expect(rowOfKey(tree, 't2')).toEqual({ top: 2, rows: 3 })
+  expect(rowOfKey(tree, 'e')).toEqual({ top: 4, rows: 1 })
+  expect(rowOfKey(tree, 'nope')).toBeUndefined()
 })
 
-test('a task list taller than the pane says how many rows lie below; one that fits says nothing', async ($, on) => {
+test('the window clamps, follows a key the least distance, and counts what lies above and below', () => {
+  expect(clampOffset(-3, 10, 4)).toBe(0)
+  expect(clampOffset(99, 10, 4)).toBe(6)
+  expect(revealOffset(0, { top: 8, rows: 2 }, 4)).toBe(6)
+  expect(revealOffset(5, { top: 2, rows: 1 }, 4)).toBe(2)
+  expect(revealOffset(3, { top: 4, rows: 1 }, 4)).toBe(3)
+  const tree = col(...Array.from({ length: 10 }, (_, i) => txt(`k${i}`))) as never
+  // Five body rows: two for the header, three for the window.
+  expect(windowed(tree, 5, 0)).toMatchObject({ offset: 0, win: 3, listRows: 10, above: 0, below: 7 })
+  expect(windowed(tree, 5, 4)).toMatchObject({ offset: 4, above: 4, below: 3 })
+  expect(windowed(tree, 5, 0, 'k9')).toMatchObject({ offset: 7, above: 7, below: 0 })
+  expect(windowed(tree, 30, 4)).toMatchObject({ offset: 0, above: 0, below: 0, view: tree })
+})
+
+test('the header rule stays its full width with or without the count, and drops the count when too narrow', () => {
+  for (const [above, below] of [[0, 0], [0, 7], [3, 7], [4, 0], [120, 120]] as const) {
+    const r = ruleParts(44, above, below)
+    expect((r.head + r.label + r.tail).length).toBe(44)
+  }
+  expect(ruleParts(44, 0, 7).label).toBe(' 7 more below ')
+  expect(ruleParts(44, 3, 7).label).toBe(' 3 above, 7 below ')
+  expect(ruleParts(44, 4, 0).label).toBe(' 4 more above ')
+  expect(ruleParts(10, 0, 7)).toEqual({ head: '─'.repeat(10), label: '', tail: '' })
+})
+
+test('a task list taller than the pane keeps the header and shows a window under it with the rows left', async ($, on) => {
   stub(on)
   await $.session.start(START)
   await $.tool.call({ tool: CREATE, tasks: Array.from({ length: 10 }, (_, i) => ({ subject: `Task ${i + 1}` })) })
-  const mount = (scroll: { offset: number; bodyRows: number }) =>
-    $.ui.mount({ plugin: 'manage-pane', surface: 'terminal', component: 'Pane', requestId: 'manage-pane', props: { ...PANE_PROPS, scroll } })
-  // Header and rule, then ten task rows: twelve, five in view.
-  const short = await mount({ offset: 0, bodyRows: 5 })
+  const mount = (bodyRows: number) =>
+    $.ui.mount({ plugin: 'manage-pane', surface: 'terminal', component: 'Pane', requestId: 'manage-pane', props: { ...PANE_PROPS, scroll: { offset: 0, bodyRows } } })
+  // Two header rows, then a window of three of the ten task rows.
+  const short = await mount(5)
+  expect(await short.find({ key: 'pane-tab:task' })).toBeDefined()
   expect(await short.find({ type: 'Text', text: ' 7 more below ' })).toBeDefined()
+  expect(await short.find({ key: 'pane-task:3' })).toBeDefined()
+  expect(await short.find({ key: 'pane-task:4' })).toBeUndefined()
   await short.unmount()
-  const tall = await mount({ offset: 0, bodyRows: 30 })
-  expect(await tall.find({ type: 'Text', text: /more below/ })).toBeUndefined()
+  const tall = await mount(30)
+  expect(await tall.find({ type: 'Text', text: /more (below|above)/ })).toBeUndefined()
+  expect(await tall.find({ key: 'pane-task:10' })).toBeDefined()
   await tall.unmount()
-  const atEnd = await mount({ offset: 7, bodyRows: 5 })
-  expect(await atEnd.find({ type: 'Text', text: /more below/ })).toBeUndefined()
+  // A task going in progress is brought into the window.
+  await $.tool.call({ tool: UPDATE, taskId: '9', status: 'in_progress' })
+  const followed = await mount(5)
+  expect(await followed.find({ key: 'pane-task:9' })).toBeDefined()
+  expect(await followed.find({ key: 'pane-task:1' })).toBeUndefined()
 })

@@ -20,7 +20,7 @@ import {
 } from './agents'
 import { flag, idOf, newTask, patchOf } from './input'
 import { bankIfShrunk, diskBody, instructionsTree, mergeLoads, scanLoads } from './instructions'
-import { failureText, HOOK_LIMIT_MS, isOutOfTime, paneTree, QUEUED_TOO_LONG } from './pane'
+import { clampOffset, failureText, HEADER_ROWS, HOOK_LIMIT_MS, isOutOfTime, paneTree, QUEUED_TOO_LONG, rowsBelow, treeRows, windowed } from './pane'
 import { slashed } from './platform'
 import { EN } from './strings'
 import type { AppliedMany, Patch } from './tasks'
@@ -67,6 +67,12 @@ const instructionsLast = atom({ plugin: 'manage-pane', key: 'instructionsLast' }
 const toolRows = atom({ plugin: 'manage-pane', key: 'toolRows' } as const, {}, { shape: 'v1' })
 const ROWS_KEPT = 200
 const tab = atom({ plugin: 'manage-pane', key: 'tab' } as const, 'task' as 'task' | 'prompt')
+// Where each tab's window under the pinned header starts, and the task a follow keeps in view
+// until the person scrolls.
+const scrollTop = atom({ plugin: 'manage-pane', key: 'scrollTop' } as const, { task: 0, prompt: 0 } as { task: number; prompt: number; follow?: string }, { shape: 'v1' })
+// The window as last drawn on the terminal, which a wheel tick moves from; undefined while the
+// view fits, or on a surface that scrolls the whole tree itself.
+let shownWindow: { tab: 'task' | 'prompt'; offset: number; listRows: number; win: number } | undefined
 
 const ignore = () => undefined
 
@@ -209,10 +215,10 @@ const persist = async (
 }
 
 // A task that goes in progress is brought into view, moving the pane's window the least
-// that shows it whole. On the clock: after the redraw that draws it.
+// that shows it whole: the next draw places the window, and keeps it so until the person scrolls.
 const follow = ($: EngineInterface, id: string | undefined) => {
   if (id === undefined || !isInteractive) return
-  $.clock.after(1, () => void $.ui.scroll({ to: { key: taskKey(id) }, in: PANE }).catch(ignore))
+  void update($, scrollTop, cur => ({ ...cur, follow: taskKey(id) })).catch(ignore)
 }
 
 // The session's list from the store when the board holds another session's (or none): a
@@ -795,8 +801,9 @@ export const register: Register = (on, options) => {
   // The pane's one render hook: the header row (tabs with their counts, the Task tab's
   // filter), then the active tab's view — the tasks with each owner and each agent its `#N`
   // named under its task, with any unclaimed agent under Other, or the instruction files by directory.
-  // The tree is drawn whole; a list taller than the pane is the engine's to scroll, and the
-  // header's rule counts the rows below the window so the person knows to.
+  // On the terminal the header stays and the view under it is drawn as a window the wheel
+  // moves (the ui.scroll hook below); the header's rule counts the rows above and below it.
+  // Another surface gets the tree whole and scrolls it itself.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const draw = $.ui.resolve(e)
     const columns = e.props.bodyColumns
@@ -811,21 +818,40 @@ export const register: Register = (on, options) => {
       task: list.length === 0 ? '' : `${doneCount}/${list.length}`,
       prompt: String(Object.keys(loads).length),
     }
+    const view =
+      shown === 'prompt' ? (
+        instructionsTree(draw, t, loads)
+      ) : (
+        <draw.Box flexDirection="column">
+          {tasksTree(draw, t, list, isLit, x => taskAgentsTree(draw, t, x, all, columns, liveOwners(list, isHidden)), isHidden)}
+          {otherAgentsTree(draw, t, list, all, columns, isHidden)}
+        </draw.Box>
+      )
+    const top = await read($, scrollTop)
+    const w = e.surface === 'terminal' ? windowed(view, e.props.scroll.bodyRows, top[shown], shown === 'task' ? top.follow : undefined) : undefined
+    shownWindow = w !== undefined && w.listRows > w.win ? { tab: shown, offset: w.offset, listRows: w.listRows, win: w.win } : undefined
+    const hint = w !== undefined ? w : { above: 0, below: rowsBelow(HEADER_ROWS + treeRows(view), e.props.scroll) }
     return paneTree(
       draw,
       t,
       { tab: shown, counts, onSet: next => update($, tab, () => next) },
       shown === 'task' ? doneFilter(draw, t, list, { isHidden, onSet: v => update($, isDoneHidden, () => v) }) : undefined,
-      shown === 'prompt'
-        ? instructionsTree(draw, t, loads)
-        : (
-            <draw.Box flexDirection="column">
-              {tasksTree(draw, t, list, isLit, x => taskAgentsTree(draw, t, x, all, columns, liveOwners(list, isHidden)), isHidden)}
-              {otherAgentsTree(draw, t, list, all, columns, isHidden)}
-            </draw.Box>
-          ),
+      w !== undefined ? w.view : view,
       columns,
-      e.props.scroll,
+      { above: hint.above, below: hint.below },
     )
+  })
+
+  // A wheel tick or scroll key over the pane moves the window under the pinned header; the
+  // engine's own window stays put (the tree drawn fits it). The person's move ends a follow.
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    const s = shownWindow
+    if (s === undefined) return next(e)
+    const offset = clampOffset(s.offset + e.by, s.listRows, s.win)
+    await update($, scrollTop, cur => {
+      const { follow: _follow, ...rest } = cur
+      return { ...rest, [s.tab]: offset }
+    })
+    return {}
   })
 }

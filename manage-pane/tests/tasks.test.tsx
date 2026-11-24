@@ -207,16 +207,17 @@ test('the pane is drawn whole: no box is sized to the rows, so a long list scrol
   expect((await ui.findAll({ type: 'Box' })).filter(b => b.props.height !== undefined || b.props.overflow !== undefined)).toEqual([])
 })
 
-// The harness has no `ui.scroll` implementation, so the follow itself is checked live; here,
-// that every task is drawn under the key it scrolls to, its owner's rows inside it.
-test('each task is one keyed element a scroll can bring into view', async ($, on) => {
+// Every task is drawn under the key a follow brings into the window, its owner's rows inside it.
+test('a claimed task is followed into the window under the header, its owner with it', async ($, on) => {
   agentStub(on)
   await $.session.start(START)
   for (let i = 1; i <= 12; i++) await $.tool.call({ tool: CREATE, subject: `Step ${i}`, description: 'd' })
   await $.agent.spawn({ prompt: 'p', subagentType: 'explorer', description: '#12 Last one' })
-  const ui = await mountRows($, 5)
-  for (let i = 1; i <= 12; i++) expect(await ui.find({ key: `pane-task:${i}` })).toBeDefined()
+  const ui = await mountRows($, 6)
+  expect(await ui.find({ key: 'pane-tab:task' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-task:12' })).toBeDefined()
   expect(await ui.find({ key: 'pane-owned:a1' })).toBeDefined()
+  expect(await ui.find({ key: 'pane-task:1' })).toBeUndefined()
 })
 
 test('task_create returns the made ids and subjects as JSON, in input order', async ($, on) => {

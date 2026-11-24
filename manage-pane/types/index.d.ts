@@ -97,6 +97,8 @@ declare module 'claude-code' {
       toolRows: Shaped<Record<string, string[]>>
       /** The tab the pane shows: `task` (tasks and their agents, the default) or `prompt` (the instruction files). */
       tab: 'task' | 'prompt'
+      /** Where each tab's window under the pinned header starts on the terminal, and the task key a follow keeps in view until the person scrolls. */
+      scrollTop: Shaped<{ task: number; prompt: number; follow?: string }>
     }
   }
 }
