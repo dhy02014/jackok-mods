@@ -795,7 +795,8 @@ export const register: Register = (on, options) => {
   // The pane's one render hook: the header row (tabs with their counts, the Task tab's
   // filter), then the active tab's view — the tasks with each owner and each agent its `#N`
   // named under its task, with any unclaimed agent under Other, or the instruction files by directory.
-  // The tree is drawn whole; a list taller than the pane is the engine's to scroll.
+  // The tree is drawn whole; a list taller than the pane is the engine's to scroll, and the
+  // header's rule counts the rows below the window so the person knows to.
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const draw = $.ui.resolve(e)
     const columns = e.props.bodyColumns
@@ -824,6 +825,7 @@ export const register: Register = (on, options) => {
             </draw.Box>
           ),
       columns,
+      e.props.scroll,
     )
   })
 }

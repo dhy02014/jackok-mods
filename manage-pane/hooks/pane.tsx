@@ -24,6 +24,7 @@ export const paneTree = (
   controls: JSX.Element | undefined,
   view: JSX.Element,
   columns: number,
+  scroll?: { offset: number; bodyRows: number },
 ) => {
   return (
     <Box flexDirection="column">
@@ -45,11 +46,70 @@ export const paneTree = (
         </Box>
         {controls !== undefined && <Box flexShrink={0}>{controls}</Box>}
       </Box>
-      <Text key="pane-header-rule" dimColor>
-        {'─'.repeat(Math.max(0, columns))}
-      </Text>
+      {headerRule({ Text }, columns, scroll === undefined ? 0 : rowsBelow(2 + treeRows(view), scroll))}
       {view}
     </Box>
+  )
+}
+
+// ---- what lies below the pane's window ----
+
+// Rows a tree takes on the terminal as this pane draws it: a Text, a Button or a bare string is
+// one row (every line here is cut, never wrapped), a column Box its children stacked plus its own
+// vertical margins and padding, a row Box its tallest child. A Box drawn `display: none` takes none.
+const childrenOf = (n: { children?: unknown; props?: { children?: unknown } }): unknown[] =>
+  [n.children ?? n.props?.children].flat(Infinity as 1)
+
+const spacing = (p: Record<string, unknown>, side: 'Top' | 'Bottom') => {
+  const num = (v: unknown) => (typeof v === 'number' && v > 0 ? v : 0)
+  return num(p[`margin${side}`] ?? p.marginY ?? p.margin) + num(p[`padding${side}`] ?? p.paddingY ?? p.padding)
+}
+
+export const treeRows = (n: unknown): number => {
+  if (Array.isArray(n)) return n.reduce((sum: number, c) => sum + treeRows(c), 0)
+  if (typeof n === 'string') return n === '' ? 0 : 1
+  if (typeof n === 'number') return 1
+  if (n === null || typeof n !== 'object') return 0
+  const el = n as { type?: unknown; children?: unknown; props?: Record<string, unknown> & { children?: unknown } }
+  if (el.type !== 'Box') return el.type === 'Text' || el.type === 'Button' ? 1 : 0
+  const p = el.props ?? {}
+  if (p.display === 'none') return 0
+  const kids = childrenOf(el).map(treeRows)
+  const isColumn = p.flexDirection === 'column' || p.flexDirection === 'column-reverse'
+  const body = isColumn ? kids.reduce((a, b) => a + b, 0) : Math.max(0, ...kids)
+  return body + spacing(p, 'Top') + spacing(p, 'Bottom')
+}
+
+// Rows of a `total`-row tree past the bottom of the window `scroll` describes.
+export const rowsBelow = (total: number, scroll: { offset: number; bodyRows: number }) =>
+  Math.max(0, total - Math.max(0, scroll.offset) - Math.max(0, scroll.bodyRows))
+
+// The dim rule under the header, `columns` wide; while rows lie below the window it carries
+// ` N more below ` near its right end, so the person sees the list goes on and scrolls.
+// ASCII only: an arrow glyph is two cells wide in some terminals and would push the rule over.
+export const ruleParts = (columns: number, below: number) => {
+  const n = Math.max(0, columns)
+  const label = ` ${below} more below `
+  const tail = 2
+  if (below <= 0 || label.length + tail + 2 > n) return { head: '─'.repeat(n), label: '', tail: '' }
+  return { head: '─'.repeat(n - label.length - tail), label, tail: '─'.repeat(tail) }
+}
+
+const headerRule = ({ Text }: Pick<Draw, 'Text'>, columns: number, below: number) => {
+  const r = ruleParts(columns, below)
+  if (r.label === '') {
+    return (
+      <Text key="pane-header-rule" dimColor>
+        {r.head}
+      </Text>
+    )
+  }
+  return (
+    <Text key="pane-header-rule">
+      <Text dimColor>{r.head}</Text>
+      <Text color="yellow">{r.label}</Text>
+      <Text dimColor>{r.tail}</Text>
+    </Text>
   )
 }
 

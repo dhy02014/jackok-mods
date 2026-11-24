@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { failureText, HOOK_LIMIT_MS, isOutOfTime, QUEUE_MARGIN_MS, QUEUED_TOO_LONG } from '../hooks/pane'
-import { START, CREATE, UPDATE, LIST, stub, mountPane, contextOf, AGENT_DONE, instructionStub, opening, rows, said } from './helpers'
+import { failureText, HOOK_LIMIT_MS, isOutOfTime, QUEUE_MARGIN_MS, QUEUED_TOO_LONG, rowsBelow, ruleParts, treeRows } from '../hooks/pane'
+import { START, CREATE, UPDATE, LIST, PANE_PROPS, stub, mountPane, contextOf, AGENT_DONE, instructionStub, opening, rows, said } from './helpers'
 
 test('no task call, Agent result or report prompt carries a task reminder: the pane is the list', async ($, on) => {
   stub(on)
@@ -105,4 +105,43 @@ test('the top row switches between the Task and Prompt tabs; task changes keep t
   expect((await ui.find({ key: 'pane-tab:task' }))?.props.label).toBe('Task 1/2')
   await ui.press({ key: 'pane-tab:task' })
   expect(await ui.find({ type: 'Text', text: 'Next list' })).toBeDefined()
+})
+
+test('rows are counted as the terminal stacks them: column Boxes add, row Boxes take the tallest', () => {
+  const text = { type: 'Text', children: ['a'] }
+  const col = (...c: unknown[]) => ({ type: 'Box', props: { flexDirection: 'column' }, children: c })
+  const row = (...c: unknown[]) => ({ type: 'Box', children: c })
+  expect(treeRows(col(text, text, row(text, col(text, text))))).toBe(4)
+  expect(treeRows(col(text, [text, [text]], undefined, false, ''))).toBe(3)
+  expect(treeRows({ type: 'Box', props: { flexDirection: 'column', marginTop: 1 }, children: [text] })).toBe(2)
+  expect(treeRows({ type: 'Box', props: { display: 'none' }, children: [text] })).toBe(0)
+  expect(rowsBelow(12, { offset: 0, bodyRows: 5 })).toBe(7)
+  expect(rowsBelow(12, { offset: 7, bodyRows: 5 })).toBe(0)
+  expect(rowsBelow(3, { offset: 0, bodyRows: 30 })).toBe(0)
+})
+
+test('the header rule stays its full width with or without the count, and drops the count when too narrow', () => {
+  for (const below of [0, 7, 120]) {
+    const r = ruleParts(44, below)
+    expect((r.head + r.label + r.tail).length).toBe(44)
+  }
+  expect(ruleParts(44, 7).label).toBe(' 7 more below ')
+  expect(ruleParts(10, 7)).toEqual({ head: '─'.repeat(10), label: '', tail: '' })
+})
+
+test('a task list taller than the pane says how many rows lie below; one that fits says nothing', async ($, on) => {
+  stub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, tasks: Array.from({ length: 10 }, (_, i) => ({ subject: `Task ${i + 1}` })) })
+  const mount = (scroll: { offset: number; bodyRows: number }) =>
+    $.ui.mount({ plugin: 'manage-pane', surface: 'terminal', component: 'Pane', requestId: 'manage-pane', props: { ...PANE_PROPS, scroll } })
+  // Header and rule, then ten task rows: twelve, five in view.
+  const short = await mount({ offset: 0, bodyRows: 5 })
+  expect(await short.find({ type: 'Text', text: ' 7 more below ' })).toBeDefined()
+  await short.unmount()
+  const tall = await mount({ offset: 0, bodyRows: 30 })
+  expect(await tall.find({ type: 'Text', text: /more below/ })).toBeUndefined()
+  await tall.unmount()
+  const atEnd = await mount({ offset: 7, bodyRows: 5 })
+  expect(await atEnd.find({ type: 'Text', text: /more below/ })).toBeUndefined()
 })
