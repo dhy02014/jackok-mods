@@ -99,7 +99,12 @@ export const sliceRows = (n: unknown, from: number, count: number): unknown => {
   if (from <= 0 && rows <= from + count) return n
   if (Array.isArray(n) || n === null || typeof n !== 'object') return from <= 0 ? n : undefined
   const el = n as El
-  if (!isColumn(el) || hasVerticalSpace(el)) return from <= 0 ? n : undefined
+  if (hasVerticalSpace(el) || el.type !== 'Box') return from <= 0 ? n : undefined
+  // A row Box: each child cut by the same window, side by side.
+  if (!isColumn(el)) {
+    const side = childrenOf(el).map(k => sliceRows(k, from, count)).filter(k => k !== undefined)
+    return side.length === 0 ? undefined : withChildren(el, side)
+  }
   const kept: unknown[] = []
   let top = 0
   for (const kid of childrenOf(el)) {

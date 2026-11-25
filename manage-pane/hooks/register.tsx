@@ -219,6 +219,13 @@ const persist = async (
 const follow = ($: EngineInterface, id: string | undefined) => {
   if (id === undefined || !isInteractive) return
   void update($, scrollTop, cur => ({ ...cur, follow: taskKey(id) })).catch(ignore)
+  // A surface other than the terminal scrolls the whole tree itself: ask it, after the redraw.
+  void $.session
+    .surfaces()
+    .then(all => {
+      if (all.some(x => x !== 'terminal')) $.clock.after(1, () => void $.ui.scroll({ to: { key: taskKey(id) }, in: PANE }).catch(ignore))
+    })
+    .catch(ignore)
 }
 
 // The session's list from the store when the board holds another session's (or none): a
@@ -500,6 +507,7 @@ export const register: Register = (on, options) => {
   on('session.end', async ($, e, next) => {
     const done = await next(e)
     if (e.reason === 'resume' || e.reason === 'clear') idByName.clear()
+    if (e.reason === 'resume' || e.reason === 'clear') await update($, scrollTop, () => ({ task: 0, prompt: 0 }))
     if (e.reason === 'resume') {
       await update($, board, () => EMPTY)
       await stopBlink($)
@@ -829,8 +837,10 @@ export const register: Register = (on, options) => {
       )
     const top = await read($, scrollTop)
     const w = e.surface === 'terminal' ? windowed(view, e.props.scroll.bodyRows, top[shown], shown === 'task' ? top.follow : undefined) : undefined
-    shownWindow = w !== undefined && w.listRows > w.win ? { tab: shown, offset: w.offset, listRows: w.listRows, win: w.win } : undefined
-    const hint = w !== undefined ? w : { above: 0, below: rowsBelow(HEADER_ROWS + treeRows(view), e.props.scroll) }
+    // Only the terminal's draw says where its window stands: another surface draws the whole tree.
+    if (e.surface === 'terminal') shownWindow = w !== undefined && w.listRows > w.win ? { tab: shown, offset: w.offset, listRows: w.listRows, win: w.win } : undefined
+    // A phone wraps cut lines, so rows cannot be counted there: no count.
+    const hint = w !== undefined ? w : e.surface === 'mobile' ? { above: 0, below: 0 } : { above: 0, below: rowsBelow(HEADER_ROWS + treeRows(view), e.props.scroll) }
     return paneTree(
       draw,
       t,
@@ -846,11 +856,19 @@ export const register: Register = (on, options) => {
   // engine's own window stays put (the tree drawn fits it). The person's move ends a follow.
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     const s = shownWindow
-    if (s === undefined) return next(e)
-    const offset = clampOffset(s.offset + e.by, s.listRows, s.win)
+    // A plugin's move (a follow on another surface) and a surface that draws the whole tree,
+    // which has rows of its own to move, are the engine's.
+    if (s === undefined || e.origin.kind !== 'person' || e.contentRows > e.bodyRows) return next(e)
+    // A page key (or Home/End, which the fitted tree makes a page too) moves one window, not the body's rows.
+    const by = e.pointer === undefined && Math.abs(e.by) >= e.bodyRows ? Math.sign(e.by) * s.win : e.by
     await update($, scrollTop, cur => {
+      // From the stored offset, so ticks landing before the redraw add up; a follow's placement
+      // lives only in the last draw.
+      const base = s.tab === 'task' && cur.follow !== undefined ? s.offset : clampOffset(cur[s.tab], s.listRows, s.win)
+      const offset = clampOffset(base + by, s.listRows, s.win)
+      if (s.tab !== 'task') return { ...cur, [s.tab]: offset }
       const { follow: _follow, ...rest } = cur
-      return { ...rest, [s.tab]: offset }
+      return { ...rest, task: offset }
     })
     return {}
   })

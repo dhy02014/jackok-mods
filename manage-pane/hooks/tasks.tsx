@@ -279,14 +279,14 @@ export const tasksTree = (
               </Text>
               <Text dimColor>#{t.id} </Text>
               <Text weight={isLive ? 'bold' : undefined} strikethrough={t.status === 'completed'}>
-                {t.subject}
+                {t.subject.replace(/\s+/g, ' ')}
               </Text>
               {waiting.length > 0 && <Text dimColor>{s.blockedBy(waiting)}</Text>}
             </Text>
             {t.status === 'in_progress' && t.activeForm !== undefined && (
               <Text wrap="truncate-end" color="yellow">
                 {'  '}
-                {t.activeForm}
+                {t.activeForm.replace(/\s+/g, ' ')}
               </Text>
             )}
             {below(t)}

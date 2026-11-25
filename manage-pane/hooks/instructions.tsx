@@ -180,7 +180,10 @@ export const instructionsTree = ({ Box, Text }: Draw, t: Strings, all: Loads) =>
         </Box>
       ))}
       {sizes.length > 0 && (
-        <Box key="pane-instruction-total" marginTop={1} justifyContent="flex-end">
+        <Text key="pane-instruction-gap"> </Text>
+      )}
+      {sizes.length > 0 && (
+        <Box key="pane-instruction-total" justifyContent="flex-end">
           <Text dimColor>{`${t.instructionsTotal}  ${formatBytes(sizes.reduce((a, b) => a + b, 0))}`}</Text>
         </Box>
       )}

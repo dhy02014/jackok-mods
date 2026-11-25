@@ -130,6 +130,10 @@ test('a slice keeps the rows in range, cutting into nested columns, and finds a 
   expect(sliceRows(tree, 0, 99)).toBe(tree)
   expect(sliceRows(tree, 6, 3)).toBeUndefined()
   expect(rowOfKey(tree, 't2')).toEqual({ top: 2, rows: 3 })
+  // A row Box (a running owner's block) is cut by the same window, never kept whole or dropped.
+  const owned = col(txt(), row(col(txt(), txt())), txt(), txt())
+  expect(treeRows(sliceRows(owned, 2, 3))).toBe(3)
+  expect(treeRows(sliceRows(owned, 0, 2))).toBe(2)
   expect(rowOfKey(tree, 'e')).toEqual({ top: 4, rows: 1 })
   expect(rowOfKey(tree, 'nope')).toBeUndefined()
 })
@@ -181,4 +185,25 @@ test('a task list taller than the pane keeps the header and shows a window under
   const followed = await mount(5)
   expect(await followed.find({ key: 'pane-task:9' })).toBeDefined()
   expect(await followed.find({ key: 'pane-task:1' })).toBeUndefined()
+})
+
+test('another surface gets the whole list and scrolls it itself, with no count on a phone', async ($, on) => {
+  stub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, tasks: Array.from({ length: 10 }, (_, i) => ({ subject: `Task ${i + 1}` })) })
+  for (const surface of ['desktop', 'mobile'] as const) {
+    const ui = await $.ui.mount({ plugin: 'manage-pane', surface, component: 'Pane', requestId: 'manage-pane', props: { ...PANE_PROPS, scroll: { offset: 0, bodyRows: 5 } } })
+    for (let i = 1; i <= 10; i++) expect(await ui.find({ key: `pane-task:${i}` })).toBeDefined()
+    if (surface === 'mobile') expect(await ui.find({ type: 'Text', text: /more (below|above)/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('a subject or activeForm holding a newline is drawn on one row', async ($, on) => {
+  stub(on)
+  await $.session.start(START)
+  await $.tool.call({ tool: CREATE, subject: 'Two\nlines', activeForm: 'Doing\nit', status: 'in_progress' })
+  const ui = await mountPane($)
+  expect(await ui.find({ type: 'Text', text: 'Two lines' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'Doing it' })).toBeDefined()
 })
