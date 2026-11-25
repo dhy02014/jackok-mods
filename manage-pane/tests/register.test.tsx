@@ -542,3 +542,31 @@ test('an interactive session’s task call waits in the queue under a 10 s timer
   expect(asked).toContain('after 10000')
   expect(asked).toContain('every 500')
 })
+
+test('a stopped or failed run is drawn ended at its report, with no turn end of its own', async ($, on) => {
+  agentStub(on)
+  await $.session.start(START)
+  await spawn($, 'Stopped')
+  await spawn($, 'Fails')
+  const ui = await mountPane($)
+  expect(await ui.find({ key: 'pane-agent:a1' })).toBeDefined()
+  await report($, 'a1', 'stopped')
+  await report($, 'a2', 'failed')
+  expect(await ui.find({ key: 'pane-agent:a1' })).toBeUndefined()
+  expect(await ui.find({ key: 'pane-agent:a2' })).toBeUndefined()
+  expect(await ui.findAll({ type: 'Text', text: /^  └ ✗ explorer/ })).toHaveLength(2)
+})
+
+test('a TaskStop that went through ends the agent it names, by id or name; a refused one leaves it running', async ($, on) => {
+  agentStub(on)
+  let isRefused = true
+  on('tool.call', { tool: 'TaskStop' }, () => (isRefused ? { deny: 'no such task' } : { result: 'stopped' }) as never)
+  await $.session.start(START)
+  await spawn($, 'Background')
+  const ui = await mountPane($)
+  await $.tool.call({ tool: 'TaskStop', task_id: 'a1' } as never)
+  expect(await ui.find({ key: 'pane-agent:a1' })).toBeDefined()
+  isRefused = false
+  await $.tool.call({ tool: 'TaskStop', task_id: 'a1' } as never)
+  expect(await ui.find({ key: 'pane-agent:a1' })).toBeUndefined()
+})

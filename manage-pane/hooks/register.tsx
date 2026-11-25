@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { PaneBoard, PaneCall, PaneTask } from '../types'
+import type { PaneAgent, PaneBoard, PaneCall, PaneTask } from '../types'
 import {
   busyOwner,
   frontmatterIn,
@@ -383,6 +383,9 @@ const patchList = async ($: EngineInterface, plan: (tasks: readonly PaneTask[]) 
 // A run that ended `completed` completes every open task its agent owns, its run frozen on each.
 // A failed or stopped run reports too and leaves them open. A task another agent still works
 // waits for that agent's report (`tasksDone`).
+// A run that ended: no longer running, its last call no longer in flight.
+const ended = (a: PaneAgent, endedAt: number): PaneAgent => ({ ...a, isRunning: false, endedAt, recent: a.recent.map(c => ({ ...c, isCalling: false })) })
+
 const finish = ($: EngineInterface, agentId: string) =>
   serial($, async () => {
     const team = await read($, agents)
@@ -630,6 +633,19 @@ export const register: Register = (on, options) => {
       }
       return ran
     }
+    if (agentId === undefined && e.tool === 'TaskStop') {
+      // A stop that went through ends the agent's run here too, for a run whose report never
+      // comes (hooks off): the pane would draw it running for good.
+      const ran = await next(e)
+      const input = e as unknown as { task_id?: unknown; shell_id?: unknown }
+      const target = typeof input.task_id === 'string' ? input.task_id : typeof input.shell_id === 'string' ? input.shell_id : undefined
+      const id = target === undefined ? undefined : (idByName.get(target) ?? target)
+      if (ran.deny === undefined && id !== undefined && (await read($, agents))[id]?.isRunning === true) {
+        const endedAt = await $.clock.now().catch(() => Date.now())
+        await update($, agents, all => touch(all, id, a => (a.isRunning ? { ...ended(a, endedAt), outcome: a.outcome ?? 'stopped' } : a))).catch(ignore)
+      }
+      return ran
+    }
     if (agentId === undefined) {
       // A rule a read pulled in rides the next request: a scan after a call keeps the list near
       // live and banks close to an auto-compaction mid-turn.
@@ -667,7 +683,9 @@ export const register: Register = (on, options) => {
   on('agent.report', async ($, e, next) => {
     const out = await next(e)
     const outcome = e.status
-    await update($, agents, all => touch(all, e.agentId, a => ({ ...a, outcome }))).catch(ignore)
+    // A stopped or failed run raises no turn.complete of its own: its report ends it.
+    const endedAt = outcome === 'completed' ? undefined : await $.clock.now().catch(() => Date.now())
+    await update($, agents, all => touch(all, e.agentId, a => (endedAt === undefined || !a.isRunning ? { ...a, outcome } : { ...ended(a, endedAt), outcome }))).catch(ignore)
     if (outcome === 'completed') await finish($, e.agentId).catch(ignore)
     return out
   })
@@ -690,9 +708,7 @@ export const register: Register = (on, options) => {
     const agentId = e.agentId
     if (agentId !== undefined) {
       const endedAt = await $.clock.now()
-      await update($, agents, all =>
-        touch(all, agentId, a => ({ ...a, isRunning: false, endedAt, recent: a.recent.map(c => ({ ...c, isCalling: false })) })),
-      )
+      await update($, agents, all => touch(all, agentId, a => (a.isRunning ? ended(a, endedAt) : a)))
     } else {
       // How a /resume or /branch gets its list back: it goes on under another session id with no session.start.
       await restore($).catch(ignore)

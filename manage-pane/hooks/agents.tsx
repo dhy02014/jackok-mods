@@ -79,10 +79,13 @@ export const runOf = (a: PaneAgent, now: number): PaneOwnerRun => ({
 
 // `✓ explorer Sonnet 5.5:medium 3m12s`: who ran, on what model and effort, for how long;
 // model and effort spelled as the state band spells them.
-const finishLabel = (r: PaneOwnerRun) => {
+// A run's end mark: ✓ for one that completed (or whose report never came), ✗ for one that failed or was stopped.
+const endMark = (a: PaneAgent) => (a.outcome === 'failed' || a.outcome === 'stopped' ? '✗' : '✓')
+
+const finishLabel = (r: PaneOwnerRun, mark = '✓') => {
   const model = r.model !== undefined ? modelLabel(r.model) : undefined
   const run = model !== undefined && r.effort !== undefined ? `${model}:${r.effort}` : (model ?? r.effort)
-  return ['✓', r.type, run, elapsed(r.ms)].filter(s => s !== undefined).join(' ')
+  return [mark, r.type, run, elapsed(r.ms)].filter(s => s !== undefined).join(' ')
 }
 
 // A resume is a new run of the same record: a fresh clock, no calls and no outcome yet.
@@ -175,7 +178,7 @@ export const ownerTree = (
       </Box>
     )
   }
-  const label = frozen !== undefined ? finishLabel(frozen) : a === undefined ? owner.slice(0, 8) : finishLabel(runOf(a, a.endedAt ?? a.startedAt))
+  const label = frozen !== undefined ? finishLabel(frozen) : a === undefined ? owner.slice(0, 8) : finishLabel(runOf(a, a.endedAt ?? a.startedAt), endMark(a))
   return (
     <Text key={`pane-owned:${owner}`} wrap="truncate-end" dimColor>
       {'  └ '}
@@ -256,7 +259,7 @@ export const otherAgentsTree = (
       {finished.map(([id, a]) => (
         <Text key={`pane-other-done:${id}`} wrap="truncate-end" dimColor>
           {'  └ '}
-          {finishLabel(runOf(a, a.endedAt ?? a.startedAt))}
+          {finishLabel(runOf(a, a.endedAt ?? a.startedAt), endMark(a))}
         </Text>
       ))}
     </Box>
