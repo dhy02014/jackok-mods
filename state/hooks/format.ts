@@ -36,7 +36,8 @@ export const modelLabel = (id: string) => {
 export const displayModel = (id: string) => {
   const ctx = /\[(\d+[kmKM])\]$/.exec(id)
   const label = modelLabel(ctx === null ? id : id.slice(0, ctx.index))
-  return `${label.charAt(0).toUpperCase()}${label.slice(1)}${ctx !== null ? `[${ctx[1].toLowerCase()}]` : ''}`
+  const size = ctx?.[1]
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)}${size !== undefined ? `[${size.toLowerCase()}]` : ''}`
 }
 
 export const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`

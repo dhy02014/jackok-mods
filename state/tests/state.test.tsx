@@ -3,11 +3,15 @@ import type { On } from 'claude-code'
 
 import { cells } from './cells'
 
+// What a test body receives as `$`.
+type Kit = Parameters<Extract<Parameters<typeof test>[1], (...args: never[]) => unknown>>[0]
+
 const BAND = {
   component: 'AbovePrompt',
   props: {
     hasSurvey: false,
     isWorking: false,
+    isCollapsed: false,
     maxRows: 10,
     bodyColumns: 120,
     scroll: { offset: 0, bodyRows: 10 },
@@ -112,7 +116,7 @@ const stub = (on: On, o: StubOptions = {}) => {
     o.writes?.push({ path: norm(e.path), text: e.text })
     return { value: undefined }
   })
-  on('command.register', () => ({ value: { name: 'state' } }))
+  on('command.register', () => ({ value: { command: 'state' } }))
   on('process.run', ($, e) => {
     o.inits?.push(e.init)
     if (o.isGitMissing === true && e.argv[0] === 'git') return { deny: 'spawn git ENOENT' }
@@ -277,14 +281,14 @@ const stepStub = (on: On, answered?: string | null) =>
   })
 
 // One request of a subagent, read to its end.
-const agentStep = async ($: Parameters<Parameters<typeof test>[1]>[0], agentId: string, effort?: string, model = 'claude-sonnet-5-5') => {
+const agentStep = async ($: Kit, agentId: string, effort?: string, model = 'claude-sonnet-5-5') => {
   const stream = $.turn.step({ turnId: 't', index: 0, model, messageCount: 1, agentId, ...(effort !== undefined ? { effort } : {}) } as never)
   for await (const _ of stream) {
     // drain
   }
 }
 
-const agentsLine = async ($: Parameters<Parameters<typeof test>[1]>[0]) => {
+const agentsLine = async ($: Kit) => {
   const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
   const line = (await ui.find({ type: 'Text', text: /^(explorer|checker|my-plugin)/ }))?.text
   await ui.unmount()
@@ -299,12 +303,12 @@ test('subagents show as an agents tally line by type and model; their live rows 
   let next = 0
   on('agent.spawn', () => ({ model: next++ === 0 ? 'claude-sonnet-5-5' : 'claude-sonnet-5-4', agentId: `a${next}` }))
   await $.session.start(START)
-  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' })
-  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' } as never)
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' } as never)
   await agentStep($, 'a1', 'high', 'claude-sonnet-5-5')
   await agentStep($, 'a2', 'high', 'claude-sonnet-5-4')
   // No request yet: no effort, so the model stands alone.
-  await $.agent.spawn({ prompt: 'p', subagentType: 'checker' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'checker' } as never)
   await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'a1' })
   // A long command is kept whole; only the terminal's edge cuts it.
   const long = `grep -n x ${'dir/'.repeat(12)}f.ts`
@@ -588,7 +592,7 @@ test('a failed pull at start still arms the minute timer', async ($, on) => {
   on('session.id', () => ({ value: 'sid-1' }))
   on('session.authorize', () => ({ value: null }))
   on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
-  on('command.register', () => ({ value: { name: 'state' } }))
+  on('command.register', () => ({ value: { command: 'state' } }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   await $.session.start(START)
   failing = false
@@ -632,11 +636,11 @@ test('the band starts shown and expanded; /state hides all of it, then shows it 
   await $.session.start(START)
   const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
   expect(await ui.find({ key: 'copy-id' })).toBeDefined()
-  expect(await $.command.run({ command: 'state' })).toMatchObject({ text: 'State band hidden.' })
+  expect(await $.command.run({ command: 'state', args: '', origin: { kind: 'composer' }, presentation: {} as never })).toMatchObject({ text: 'State band hidden.' })
   const hidden = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
   expect(await hidden.find({ type: 'Button' })).toBeUndefined()
   expect(await hidden.find({ type: 'Text', text: /\S/ })).toBeUndefined()
-  expect(await $.command.run({ command: 'state' })).toMatchObject({ text: 'State band shown.' })
+  expect(await $.command.run({ command: 'state', args: '', origin: { kind: 'composer' }, presentation: {} as never })).toMatchObject({ text: 'State band shown.' })
   const shown = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
   expect(await shown.find({ key: 'copy-id' })).toBeDefined()
 })
@@ -724,12 +728,12 @@ for (const model of ['claude-opus-5-5', ARN]) {
     expect(lineCells).toBeLessThanOrEqual(80)
     // Model, cwd and branch, each one truncating Text in a shrinking Box. An id the band
     // cannot parse (`Arn:aws:...`, first letter raised) is cut; the short cwd and branch are not.
-    const texts = shrinking.map(p => textOf(p))
-    expect(texts.slice(1)).toEqual(['~/proj', 'main* ↑2'])
+    const [modelText = '', ...rest] = shrinking.map(p => textOf(p))
+    expect(rest).toEqual(['~/proj', 'main* ↑2'])
     if (model === ARN) {
-      expect(texts[0].startsWith('Arn:aws:bedrock:')).toBe(true)
-      expect(texts[0].endsWith('…')).toBe(true)
-    } else expect(texts[0]).toBe('Opus 5.5')
+      expect(modelText.startsWith('Arn:aws:bedrock:')).toBe(true)
+      expect(modelText.endsWith('…')).toBe(true)
+    } else expect(modelText).toBe('Opus 5.5')
     const wraps = shrinking.map(p => {
       const kid = p.children?.[0]
       const text = isNode(kid) && kid.type === 'Button' ? kid.children?.[0] : kid
@@ -762,8 +766,9 @@ for (const columns of [120, 100, 80, 60, 44]) {
       expect(texts).toHaveLength(3)
       expect(texts[0]).toBe('Opus 5.5')
       expect(cwd?.endsWith('cards')).toBe(true)
-      expect(texts[2].startsWith('worktree')).toBe(true)
-      expect(texts[2].endsWith('…')).toBe(true)
+      const branch = texts[2] ?? ''
+      expect(branch.startsWith('worktree')).toBe(true)
+      expect(branch.endsWith('…')).toBe(true)
     }
   })
 }
@@ -782,7 +787,7 @@ test('a subagent’s tally effort is its first request’s, never its definition
   let n = 0
   on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `a${++n}` }))
   await $.session.start(START)
-  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'explorer' } as never)
   // Before a request the spawn counts with no effort.
   expect(await agentsLine($)).toBe('explorer (Sonnet 5.5 x1)')
   await agentStep($, 'a1', 'low')
@@ -810,13 +815,13 @@ test('a plugin agent counts under the model that answered its first request; a p
   let n = 0
   on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `a${++n}` }))
   await $.session.start(START)
-  await $.agent.spawn({ prompt: 'p', subagentType: 'my-plugin:reviewer' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'my-plugin:reviewer' } as never)
   await agentStep($, 'a1', 'xhigh')
   answered = '<synthetic>'
-  await $.agent.spawn({ prompt: 'p', subagentType: 'my-plugin:reviewer' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'my-plugin:reviewer' } as never)
   await agentStep($, 'a2', 'xhigh')
   answered = null
-  await $.agent.spawn({ prompt: 'p', subagentType: 'my-plugin:reviewer' })
+  await $.agent.spawn({ prompt: 'p', subagentType: 'my-plugin:reviewer' } as never)
   await agentStep($, 'a3', 'xhigh')
   expect(await agentsLine($)).toBe('my-plugin:reviewer (Sonnet 5.5:xhigh x2, Opus 5.5:xhigh x1)')
 })
@@ -838,7 +843,7 @@ const tallyStub = (on: On, o: { fail?: boolean; isStreamed?: boolean } = {}) => 
   on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: `a${++n}` }))
 }
 
-const openStep = ($: Parameters<Parameters<typeof test>[1]>[0], agentId: string, effort: string) =>
+const openStep = ($: Kit, agentId: string, effort: string) =>
   $.turn.step({ turnId: 't', index: 0, model: 'claude-sonnet-5-5', messageCount: 1, agentId, effort } as never)
 
 test('a first request that throws leaves the spawn waiting; the next one records its effort', async ($, on) => {
@@ -958,7 +963,7 @@ test('a live advisor call takes the tool row, its mark blinking', async ($, on) 
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'end_turn' as const, usage: null }
   })
   await $.session.start(START)
-  const row = (agentId: string | undefined, uuid: string, block: Record<string, unknown>) =>
+  const row = (agentId: string | undefined, uuid: string, block: { type: string } & Record<string, unknown>) =>
     $.session.append({
       door: 'response',
       origin: { kind: 'model', model: 'claude-opus-5-5' },
@@ -967,9 +972,13 @@ test('a live advisor call takes the tool row, its mark blinking', async ($, on) 
       message: { type: 'assistant', role: 'assistant', content: [{ type: 'text', text: 'x' }, block] },
     })
   const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND })
-  const dot = () => ui.find({ type: 'Text', text: '  ◐ ', props: { color: 'yellow' } })
-  const gap = () => ui.find({ type: 'Text', text: '    ', props: { color: 'yellow' } })
-  const label = () => ui.find({ type: 'Text', text: 'advisor', props: { color: 'cyan' } })
+  // A Text with this text and color, or undefined.
+  const colored = async (text: string, color: string) => {
+    return (await ui.findAll({ type: 'Text', text })).find(n => n.props.color === color)
+  }
+  const dot = () => colored('  ◐ ', 'yellow')
+  const gap = () => colored('    ', 'yellow')
+  const label = () => colored('advisor', 'cyan')
   expect(await dot()).toBeUndefined()
   expect(await label()).toBeUndefined()
 

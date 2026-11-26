@@ -18,9 +18,9 @@ test('shareWidths keeps a short part whole and cuts the heavier long part first'
   const ws = shareWidths([{ width: 76, weight: 1 }, { width: 6, weight: 2 }, { width: 8, weight: 3 }], 40)
   expect(ws).toEqual([26, 6, 8])
   // Two long parts: the heavier gives way more, and the room is used exactly.
-  const two = shareWidths([{ width: 40, weight: 2 }, { width: 40, weight: 3 }], 50)
-  expect(two[0] + two[1]).toBe(50)
-  expect(two[0]).toBeGreaterThan(two[1])
+  const [cwd = 0, branch = 0] = shareWidths([{ width: 40, weight: 2 }, { width: 40, weight: 3 }], 50)
+  expect(cwd + branch).toBe(50)
+  expect(cwd).toBeGreaterThan(branch)
   expect(shareWidths([{ width: 10, weight: 1 }], -5)).toEqual([0])
 })
 

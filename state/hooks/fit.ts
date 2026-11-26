@@ -55,9 +55,10 @@ export const truncateStart = (s: string, max: number) => {
   let out = ''
   let n = 0
   for (let i = chars.length - 1; i >= 0; i--) {
-    const w = cellsOf(chars[i])
+    const ch = chars[i] ?? ''
+    const w = cellsOf(ch)
     if (n + w > max - 1) break
-    out = chars[i] + out
+    out = ch + out
     n += w
   }
   return ELLIPSIS + out
@@ -81,17 +82,17 @@ export const shareWidths = (parts: readonly Part[], room: number): number[] => {
     if (sum(widthsAt(mid)) <= free) lo = mid
     else hi = mid - 1
   }
-  const widths = widthsAt(lo)
-  let left = free - sum(widths)
-  const order = parts.map((_, i) => i).sort((a, b) => parts[a].weight - parts[b].weight || a - b)
-  for (const i of order) {
+  let left = free - sum(widthsAt(lo))
+  const order = parts.map((p, i) => ({ p, i })).sort((a, b) => a.p.weight - b.p.weight || a.i - b.i)
+  const bonus = new Set<number>()
+  for (const { p, i } of order) {
     if (left <= 0) break
-    if (widths[i] < parts[i].width) {
-      widths[i]++
+    if (Math.min(p.width, Math.floor(lo / Math.max(1, p.weight))) < p.width) {
+      bonus.add(i)
       left--
     }
   }
-  return widths
+  return widthsAt(lo).map((w, i) => (bonus.has(i) ? w + 1 : w))
 }
 
 // A part cut below this many cells says nothing; it is dropped with its separator instead.
@@ -101,19 +102,21 @@ export const MIN_PART = 4
 // or -1 for a dropped one. While a cut part would show fewer than MIN_PART cells, the
 // heaviest kept part (the least informative) is dropped and the rest are fitted again.
 export const fitParts = (parts: readonly Part[], room: number, sep: number): number[] => {
-  const kept = parts.map((_, i) => i)
+  let kept = parts.map((p, i) => ({ p, i }))
   for (;;) {
     const widths = shareWidths(
-      kept.map(i => parts[i]),
+      kept.map(k => k.p),
       room - sep * kept.length,
     )
-    const isTooShort = widths.some((w, k) => w < parts[kept[k]].width && w < MIN_PART)
+    const isTooShort = kept.some((k, n) => {
+      const w = widths[n] ?? 0
+      return w < k.p.width && w < MIN_PART
+    })
     if (!isTooShort || kept.length === 0) {
-      const out = parts.map(() => -1)
-      kept.forEach((i, k) => (out[i] = widths[k]))
-      return out
+      const byIndex = new Map(kept.map((k, n) => [k.i, widths[n] ?? 0]))
+      return parts.map((_, i) => byIndex.get(i) ?? -1)
     }
-    const heaviest = kept.reduce((a, b) => (parts[b].weight >= parts[a].weight ? b : a))
-    kept.splice(kept.indexOf(heaviest), 1)
+    const heaviest = kept.reduce((a, b) => (b.p.weight >= a.p.weight ? b : a))
+    kept = kept.filter(k => k !== heaviest)
   }
 }

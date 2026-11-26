@@ -39,7 +39,7 @@ export const short = (s: string, max: number) => (s.length <= max ? s : `${s.sli
 const toolLabel = (name: string) => {
   const m = /^mcp__(.+?)__(.+)$/.exec(name)
   if (m === null) return name
-  const [, server, tool] = m
+  const [, server = '', tool = ''] = m
   const serverWords = new Set(server.toLowerCase().split(/[-_]/))
   const kept = tool.split('_').filter(w => !serverWords.has(w.toLowerCase()))
   return short(`${server}:${kept.length > 0 ? kept.join('_') : tool}`, 24)
@@ -149,7 +149,7 @@ export const bandTree = ({ Box, Button, Text }: Draw, o: BandInput, below: JSX.E
   type ModelRuns = { model: string; n: number; efforts: EffortRuns[] }
   const byType = new Map<string, { n: number; models: Map<string, ModelRuns> }>()
   for (const [key, n] of Object.entries(o.agentTally)) {
-    const [type, id = '', effort = ''] = key.split('\t')
+    const [type = '', id = '', effort = ''] = key.split('\t')
     const model = id === '' ? '' : displayModel(id)
     const t = byType.get(type) ?? { n: 0, models: new Map<string, ModelRuns>() }
     const m = t.models.get(model) ?? { model, n: 0, efforts: [] }
@@ -236,13 +236,11 @@ export const bandTree = ({ Box, Button, Text }: Draw, o: BandInput, below: JSX.E
     </Box>
   )
   const shrinking = new Set<unknown>([CWD, MODEL, BRANCH])
-  const joinedFixed = (parts: unknown[]) =>
-    parts
-      .filter(p => p !== null && p !== false)
-      .flatMap((p, i) => (i === 0 ? [p] : [SEP, p]))
-      .map(p => (shrinking.has(p) ? p : <Box flexShrink={0}>{p}</Box>))
+  type Piece = JSX.Element | false | null | undefined
+  const present = (p: Piece): p is JSX.Element => p !== null && p !== false && p !== undefined
   // `a | b | c` from whichever parts are present.
-  const joined = (parts: unknown[]) => parts.filter(p => p !== null && p !== false).flatMap((p, i) => (i === 0 ? [p] : [SEP, p]))
+  const joined = (parts: readonly Piece[]): JSX.Element[] => parts.filter(present).flatMap((p, i) => (i === 0 ? [p] : [SEP, p]))
+  const joinedFixed = (parts: readonly Piece[]) => joined(parts).map(p => (shrinking.has(p) ? p : <Box flexShrink={0}>{p}</Box>))
 
   const usageParts = [
     ...usage.map(u => {
