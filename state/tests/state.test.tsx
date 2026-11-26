@@ -698,7 +698,9 @@ const topLine = async (ui: { drawn: () => Promise<unknown> }) => {
   const pieces = (parts?.children ?? []) as Node[]
   const fixed = pieces.filter(p => p.props?.flexShrink === 0)
   const shrinking = pieces.filter(p => typeof p.props?.flexShrink === 'number' && p.props.flexShrink > 0)
-  return { fixedCells: 2 + fixed.reduce((n, p) => n + cells(textOf(p)), 0) + cells(textOf(id)), shrinking, id }
+  // The indent, every part, the gap before the id, and the id: the row's whole width.
+  const lineCells = 2 + cells(textOf(parts)) + 1 + cells(textOf(id))
+  return { fixedCells: 2 + fixed.reduce((n, p) => n + cells(textOf(p)), 0) + cells(textOf(id)), shrinking, id, lineCells, pieces }
 }
 
 for (const model of ['claude-opus-5-5', ARN]) {
@@ -717,11 +719,17 @@ for (const model of ['claude-opus-5-5', ARN]) {
     await ui.press({ key: 'copy-id' })
     expect(copied).toEqual([SID])
 
-    const { fixedCells, shrinking } = await topLine(ui)
+    const { fixedCells, shrinking, lineCells } = await topLine(ui)
     expect(fixedCells).toBeLessThanOrEqual(80)
-    // Model, cwd and branch, each one truncating Text in a shrinking Box.
-    // An id the band cannot parse shows whole, first letter raised (`Arn:aws:...`).
-    expect(shrinking.map(p => textOf(p))).toEqual([model === ARN ? `A${ARN.slice(1)}` : 'Opus 5.5', '~/proj', 'main* ↑2'])
+    expect(lineCells).toBeLessThanOrEqual(80)
+    // Model, cwd and branch, each one truncating Text in a shrinking Box. An id the band
+    // cannot parse (`Arn:aws:...`, first letter raised) is cut; the short cwd and branch are not.
+    const texts = shrinking.map(p => textOf(p))
+    expect(texts.slice(1)).toEqual(['~/proj', 'main* ↑2'])
+    if (model === ARN) {
+      expect(texts[0].startsWith('Arn:aws:bedrock:')).toBe(true)
+      expect(texts[0].endsWith('…')).toBe(true)
+    } else expect(texts[0]).toBe('Opus 5.5')
     const wraps = shrinking.map(p => {
       const kid = p.children?.[0]
       const text = isNode(kid) && kid.type === 'Button' ? kid.children?.[0] : kid
@@ -730,6 +738,33 @@ for (const model of ['claude-opus-5-5', ARN]) {
     expect(wraps).toEqual(['truncate-end', 'truncate-start', 'truncate-end'])
     // The least informative gives way first: branch, then cwd, then the model.
     expect(shrinking.map(p => p.props?.flexShrink)).toEqual([1, 2, 3])
+  })
+}
+
+// A deep worktree whose branch repeats its name: the cwd wrapped to a second row inside its
+// copy button, and the cut branch ran straight into the id.
+const LONG_CWD = '/home/u/proj/.claude/worktrees/handoff-close-sandbox-cards'
+const LONG_BRANCH = '# branch.head worktree-handoff-close-sandbox-cards\n'
+for (const columns of [120, 100, 80, 60, 44]) {
+  test(`at ${columns} columns a long cwd and branch keep the top line to one row`, async ($, on) => {
+    stub(on, { cwd: LONG_CWD, gitStdout: LONG_BRANCH, sessionId: SID })
+    await $.session.start(START)
+    const ui = await $.ui.mount({ plugin: 'state', surface: 'terminal', ...BAND, props: { ...BAND.props, bodyColumns: columns } })
+    const { lineCells, shrinking, pieces } = await topLine(ui)
+    expect(lineCells).toBeLessThanOrEqual(columns)
+    expect(textOf(pieces[0]).startsWith('Context 42%')).toBe(true)
+    const texts = shrinking.map(p => textOf(p))
+    // Whatever shows of the cwd is its tail, of the model and branch their head.
+    for (const t of texts) expect(t.length).toBeGreaterThanOrEqual(4)
+    const cwd = texts.find(t => t.endsWith('cards') || t.startsWith('…/'))
+    if (cwd !== undefined) expect('…/worktrees/handoff-close-sandbox-cards'.endsWith(cwd.replace(/^…/, ''))).toBe(true)
+    if (columns >= 100) {
+      expect(texts).toHaveLength(3)
+      expect(texts[0]).toBe('Opus 5.5')
+      expect(cwd?.endsWith('cards')).toBe(true)
+      expect(texts[2].startsWith('worktree')).toBe(true)
+      expect(texts[2].endsWith('…')).toBe(true)
+    }
   })
 }
 

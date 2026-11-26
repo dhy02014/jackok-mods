@@ -1,6 +1,7 @@
 import type { Elements, RenderSurface } from 'claude-code'
 
 import type { HudAdvisor, HudGit, HudSnap, HudTool, HudWeekly } from '../types'
+import { cells, fitParts, truncateEnd, truncateStart } from './fit'
 import { displayModel } from './format'
 import { isUnder } from './platform'
 import type { BandLabels } from './strings'
@@ -16,6 +17,12 @@ const CONTENT_INDENT = 2
 // Below this many band columns the top line shows an 8-character id prefix.
 const NARROW_COLUMNS = 100
 const SHORT_ID = 8
+
+// Cells between the top line's last part and the id, so a cut branch never runs into it.
+const ID_GAP = 1
+
+// ` | ` between parts.
+const SEP_CELLS = 3
 
 export const kTokens = (n: number) => (Math.abs(n) >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n))
 
@@ -172,32 +179,59 @@ export const bandTree = ({ Box, Button, Text }: Draw, o: BandInput, below: JSX.E
 
   const SEP = <Text dimColor> | </Text>
   // The top line stays one row: the context part keeps its width, and the model, the cwd
-  // and the branch give way. The cwd, at most two segments, truncates from the left and
-  // copies the full path when pressed; the model (an unparsed id can be a long ARN) and
-  // the branch truncate at the end. Each gives way in proportion to its weight times its width: branch 3, cwd 2, model 1.
-  const CWD = (
+  // and the branch give way. Their widths are fitted here, in cells, rather than left to
+  // the engine, which wraps a Text inside a Button instead of truncating it. The cwd, at
+  // most two segments, truncates from the left and copies the full path when pressed; the
+  // model (an unparsed id can be a long ARN) and the branch truncate at the end. A short part
+  // keeps its width; long ones are cut to a share divided by weight: branch 3, cwd 2, model 1; one cut below
+  // MIN_PART cells is dropped, the branch first. Too narrow even for the context alone, its
+  // optional figures go, the compaction drop first.
+  const idText = o.columns < NARROW_COLUMNS ? s.sessionId.slice(0, SHORT_ID) : s.sessionId
+  const room = o.columns - CONTENT_INDENT - ID_GAP - cells(idText)
+  const ctxTotal = total !== undefined ? ` (${kPrecise(total)})` : ''
+  const ctxAdded = added !== undefined && added > 0 ? ` ▲+${kPrecise(added)}` : ''
+  const ctxDrop = delta !== undefined && delta < 0 ? ` ▼${kTokens(delta)}` : ''
+  const ctxHead = `${o.labels.context} ${ctx}%`
+  const ctxShown = [ctxTotal, ctxAdded, ctxDrop]
+  for (let i = ctxShown.length - 1; i >= 0 && cells(ctxHead + ctxShown.join('')) > room; i--) ctxShown[i] = ''
+  const [shownTotal, shownAdded, shownDrop] = ctxShown
+  const modelName = displayModel(s.model)
+  const modelFull = modelName + (eff !== null ? `:${eff}` : '')
+  const cwdFull = cwdLabel(s.cwd, o.home)
+  const branchFull =
+    g === null
+      ? ''
+      : `${g.branch}${g.changed > 0 ? '*' : ''}${g.ahead > 0 ? ` ↑${g.ahead}` : ''}${g.behind > 0 ? ` ↓${g.behind}` : ''}`
+  const [modelW, cwdW, branchW] = fitParts(
+    [
+      { width: cells(modelFull), weight: 1 },
+      { width: cells(cwdFull), weight: 2 },
+      { width: g === null ? 0 : cells(branchFull), weight: 3 },
+    ].slice(0, g === null ? 2 : 3),
+    room - cells(ctxHead + ctxShown.join('')),
+    SEP_CELLS,
+  )
+  const CWD = cwdW !== undefined && cwdW >= 0 && (
     <Box flexShrink={2}>
       <Button key="copy-cwd" plain onPress={p => o.onCopyCwd(p.surface)}>
-        <Text color="yellow" wrap="truncate-start">{cwdLabel(s.cwd, o.home)}</Text>
+        <Text color="yellow" wrap="truncate-start">{truncateStart(cwdFull, cwdW)}</Text>
       </Button>
     </Box>
   )
   // `Opus 5.5:medium`, spelled and colored as the agents line spells a subagent's run.
-  const MODEL = (
+  const modelShown = modelW !== undefined && modelW >= 0 ? truncateEnd(modelFull, modelW) : ''
+  const MODEL = modelW !== undefined && modelW >= 0 && (
     <Box flexShrink={1}>
       <Text wrap="truncate-end">
-        <Text color="cyan">{displayModel(s.model)}</Text>
-        {eff !== null && <Text dimColor>:{eff}</Text>}
+        <Text color="cyan">{modelShown.slice(0, modelName.length)}</Text>
+        {modelShown.length > modelName.length && <Text dimColor>{modelShown.slice(modelName.length)}</Text>}
       </Text>
     </Box>
   )
-  const BRANCH = g !== null && (
+  const BRANCH = g !== null && branchW !== undefined && branchW >= 0 && (
     <Box flexShrink={3}>
       <Text color="magenta" wrap="truncate-end">
-        {g.branch}
-        {g.changed > 0 ? '*' : ''}
-        {g.ahead > 0 ? ` ↑${g.ahead}` : ''}
-        {g.behind > 0 ? ` ↓${g.behind}` : ''}
+        {truncateEnd(branchFull, branchW)}
       </Text>
     </Box>
   )
@@ -295,12 +329,10 @@ export const bandTree = ({ Box, Button, Text }: Draw, o: BandInput, below: JSX.E
             <Text>
               <Text dimColor>{o.labels.context} </Text>
               <Text color={ctxLevel(ctx)}>{ctx}%</Text>
-              {total !== undefined && <Text dimColor> ({kPrecise(total)})</Text>}
-              {added !== undefined && added > 0 && <Text color="cyan"> ▲+{kPrecise(added)}</Text>}
-              {delta !== undefined && delta < 0 && (
-                // A drop between turns is a compaction; growth is already the ▲ figure.
-                <Text color="green"> ▼{kTokens(delta)}</Text>
-              )}
+              {shownTotal !== '' && <Text dimColor>{shownTotal}</Text>}
+              {shownAdded !== '' && <Text color="cyan">{shownAdded}</Text>}
+              {/* A drop between turns is a compaction; growth is already the ▲ figure. */}
+              {shownDrop !== '' && <Text color="green">{shownDrop}</Text>}
             </Text>,
             MODEL,
             CWD,
@@ -308,9 +340,9 @@ export const bandTree = ({ Box, Button, Text }: Draw, o: BandInput, below: JSX.E
           ])}
         </Box>
         {/* Pressing the id copies it; the button itself is the label. */}
-        <Box flexShrink={0}>
+        <Box flexShrink={0} paddingLeft={ID_GAP}>
           <Button key="copy-id" plain onPress={p => o.onCopyId(p.surface)}>
-            <Text color="cyan">{o.columns < NARROW_COLUMNS ? s.sessionId.slice(0, SHORT_ID) : s.sessionId}</Text>
+            <Text color="cyan">{idText}</Text>
           </Button>
         </Box>
       </Box>
