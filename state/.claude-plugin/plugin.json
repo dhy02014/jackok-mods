@@ -1,6 +1,6 @@
 {
   "name": "state",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "author": { "name": "jackok" },
   "description": "Session state band above the prompt: context trend, model/effort, cwd and git branch, 5h/7d rate limits, cost, tool and subagent tallies, advisor calls, and threshold toasts; /state hides or shows it",
   "types": "./types/index.d.ts",
